@@ -38,6 +38,17 @@ HTTP_PORT = 8000
 # Hytera HR1065 DMR-Repeater
 REPEATER_IP          = "192.168.0.230"
 SNMP_TRAP_PORT       = 10162   # Repeater sendet Traps hierher
+SNMP_PORT            = 161     # SNMPv1/v2c Polling-Port auf dem Repeater
+SNMP_COMMUNITY       = "public"# Community String (laut HYTERA-REPEATER-MIB: public)
+SNMP_POLL_INTERVAL_S = 30      # Telemetrie-Abfragezyklus (Sekunden)
+
+# Schwellenwerte für Repeater-Telemetrie (LibreNMS-Standard)
+RPT_WARN_VSWR_HIGH   = 2.0     # VSWR > 2.0 = Warnung
+RPT_ALARM_VSWR_HIGH  = 2.8     # VSWR > 2.8 = Kritisch (Antennenschaden)
+RPT_WARN_TEMP_HIGH   = 60.0    # PA-Temperatur > 60°C = Warnung
+RPT_ALARM_TEMP_HIGH  = 75.0    # PA-Temperatur > 75°C = Kritisch
+RPT_WARN_VOLT_LOW    = 12.0    # Spannung < 12.0 V = Warnung
+RPT_WARN_VOLT_HIGH   = 15.2    # Spannung > 15.2 V = Überspannung
 
 # BlueWalker PowerWalker VFI 2000 ICR IoT (USV)
 UPS_IP               = "192.168.0.232"

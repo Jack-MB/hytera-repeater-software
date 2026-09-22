@@ -38,6 +38,7 @@ try:
     from .db_manager import DatabaseManager, db_manager
     from .protocol.manager import UDPManager
     from .hardware.snmp_trap import SNMPTrapMonitor
+    from .hardware.snmp_poller import HyteraSNMPPoller
     from .hardware.ups_modbus import UPSMonitor
     from .hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
     from .services.audio_recorder import AudioRecorder
@@ -51,6 +52,7 @@ except ImportError:
         from backend.db_manager import DatabaseManager, db_manager
         from backend.protocol.manager import UDPManager
         from backend.hardware.snmp_trap import SNMPTrapMonitor
+        from backend.hardware.snmp_poller import HyteraSNMPPoller
         from backend.hardware.ups_modbus import UPSMonitor
         from backend.hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
         from backend.services.audio_recorder import AudioRecorder
@@ -63,6 +65,7 @@ except ImportError:
         from db_manager import DatabaseManager, db_manager
         from protocol.manager import UDPManager
         from hardware.snmp_trap import SNMPTrapMonitor
+        from hardware.snmp_poller import HyteraSNMPPoller
         from hardware.ups_modbus import UPSMonitor
         from hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
         from services.audio_recorder import AudioRecorder
@@ -117,10 +120,55 @@ ws_manager = WebSocketManager()
 # Globale Hardware-Monitore (werden in lifespan konfiguriert)
 _udp_manager:   Optional[UDPManager]       = None
 _snmp_monitor:  Optional[SNMPTrapMonitor]  = None
+_snmp_poller:   Optional[HyteraSNMPPoller] = None
 _ups_monitor:   Optional[UPSMonitor]       = None
 _zte_monitor:   Optional[ZTEMonitor]       = None
 _omada_monitor: Optional[OmadaER606Monitor] = None
 _audio_recorder: Optional[AudioRecorder]   = None
+
+
+def get_repeater_full_state() -> Dict[str, Any]:
+    """
+    Führt passiven SNMP-Trap-Monitor-Status und aktive Poller-Messwerte
+    (PA-Temperatur, VSWR, Leistung, Spannung, RSSI) zu einem konsolidierten Status zusammen.
+    """
+    state: Dict[str, Any] = {
+        "online":            False,
+        "trap_count":        0,
+        "alarm_count":       0,
+        "last_trap_ts":      None,
+        "last_alarm":        None,
+        "active_alarms":     [],
+        "temp_wert":         None,
+        "volt_wert":         None,
+        "fw_pwr_watt":       None,
+        "ref_pwr_watt":      None,
+        "vswr_wert":         None,
+        "fan_speed":         None,
+        "rssi_slot1":        None,
+        "rssi_slot2":        None,
+        "power_source":      "DC",
+        "battery_connected": True,
+        "serial_number":     "",
+        "firmware_version":  "",
+        "model_name":        "Hytera HR1065",
+        "warnings":          [],
+    }
+    if _snmp_monitor:
+        state.update(_snmp_monitor.get_state())
+    if _snmp_poller:
+        poll_st = _snmp_poller.get_telemetry_dict()
+        if poll_st.get("online"):
+            state["online"] = True
+        for k in (
+            "temp_wert", "volt_wert", "fw_pwr_watt", "ref_pwr_watt",
+            "vswr_wert", "fan_speed", "rssi_slot1", "rssi_slot2",
+            "power_source", "battery_connected", "warnings",
+            "serial_number", "firmware_version", "model_name",
+        ):
+            if poll_st.get(k) is not None:
+                state[k] = poll_st[k]
+    return state
 
 
 async def _broadcast_event(event: Dict[str, Any]) -> None:
@@ -277,6 +325,7 @@ async def _broadcast_event(event: Dict[str, Any]) -> None:
 async def lifespan(app: FastAPI):
     """Startet/Stoppt alle Background-Services."""
     global _udp_manager, _snmp_monitor, _ups_monitor, _zte_monitor, _omada_monitor, _audio_recorder
+    global _udp_manager, _snmp_monitor, _snmp_poller, _ups_monitor, _zte_monitor, _omada_monitor, _audio_recorder
 
     # DB initialisieren
     await db_manager.init_db()
@@ -286,19 +335,20 @@ async def lifespan(app: FastAPI):
     settings = {**DEFAULT_SETTINGS, **await db_manager.get_all_settings()}
 
     # Hardware-IPs aus Settings
-    ups_ip    = settings.get("hw_usv_ip", UPS_IP)
-    zte_ip    = settings.get("hw_zte_ip", ZTE_IP)
-    omada_ip  = settings.get("hw_omada_ip", OMADA_IP)
+    mock_active = settings.get("hw_simulation", False)
+    repeater_ip = settings.get("hw_repeater_ip", REPEATER_IP)
+    ups_ip      = settings.get("hw_usv_ip",      UPS_IP)
+    zte_ip      = settings.get("hw_zte_ip",      ZTE_IP)
+    omada_ip    = settings.get("hw_omada_ip",    OMADA_IP)
 
     # Protokoll-Manager
-    mock_active = settings.get("mock_active", False)
     _udp_manager = UDPManager(
         event_callback = _broadcast_event,
         enable_mock    = mock_active,
     )
     await _udp_manager.start()
 
-    # SNMP Trap Monitor
+    # SNMP Trap Monitor (Passiver Empfänger auf Port 10162)
     async def _snmp_callback(trap_event) -> None:
         d = trap_event.to_dict() if hasattr(trap_event, "to_dict") else dict(trap_event)
         d["type"] = "repeater_alarm"
@@ -309,6 +359,22 @@ async def lifespan(app: FastAPI):
         on_trap = _snmp_callback,
     )
     asyncio.create_task(_snmp_monitor.start(), name="snmp_monitor")
+
+    # SNMP Poller für aktive Live-Telemetrie (PA-Temp, VSWR, Watt, Volt)
+    async def _snmp_telemetry_callback(telemetry_data: Dict[str, Any]) -> None:
+        full_st = get_repeater_full_state()
+        full_st["type"] = "repeater_update"
+        await ws_manager.broadcast(full_st)
+
+    _snmp_poller = HyteraSNMPPoller(
+        repeater_ip  = repeater_ip,
+        port         = int(settings.get("hw_repeater_snmp_port", 161)),
+        community    = str(settings.get("hw_repeater_snmp_community", "public")),
+        interval_s   = int(settings.get("hw_repeater_poll_interval", 30)),
+        on_telemetry = _snmp_telemetry_callback,
+    )
+    if not mock_active:
+        asyncio.create_task(_snmp_poller.start(), name="snmp_poller")
 
     # USV Modbus Monitor
     if not settings.get("hw_simulation", False):
@@ -426,6 +492,7 @@ async def lifespan(app: FastAPI):
     if _audio_recorder: _audio_recorder.stop()
     if _udp_manager:   await _udp_manager.stop()
     if _snmp_monitor:  _snmp_monitor.stop()
+    if _snmp_poller:   _snmp_poller.stop()
     if _ups_monitor:   _ups_monitor.stop()
     if _zte_monitor:   _zte_monitor.stop()
     if _omada_monitor: _omada_monitor.stop()
@@ -492,8 +559,7 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception as e:
             logger.debug(f"WS Init Omada: {e}")
         try:
-            if _snmp_monitor:
-                await ws.send_json({"type": "repeater_update", **_snmp_monitor.get_state()})
+            await ws.send_json({"type": "repeater_update", **get_repeater_full_state()})
         except Exception as e:
             logger.debug(f"WS Init Repeater: {e}")
 
@@ -1083,7 +1149,7 @@ async def get_system_status():
         "radios_total": len(radios),
         "radios_online": sum(1 for r in radios if r.get("online")),
         "hardware": {
-            "repeater": _snmp_monitor.get_state() if _snmp_monitor else {"online": False},
+            "repeater": get_repeater_full_state(),
             "ups":      _ups_monitor.get_state()  if _ups_monitor  else {"online": False},
             "zte":      _zte_monitor.get_state()  if _zte_monitor  else {"online": False},
             "omada":    _omada_monitor.get_state() if _omada_monitor else {"online": False},
@@ -1097,11 +1163,20 @@ async def get_system_status():
 @app.get("/api/hardware/status")
 async def get_hardware_status():
     return {
-        "repeater": _snmp_monitor.get_state() if _snmp_monitor else {"online": False},
+        "repeater": get_repeater_full_state(),
         "ups":      _ups_monitor.get_state()  if _ups_monitor  else {"online": False},
         "zte":      _zte_monitor.get_state()  if _zte_monitor  else {"online": False},
         "omada":    _omada_monitor.get_state() if _omada_monitor else {"online": False},
     }
+
+
+@app.post("/api/hardware/repeater/poll")
+async def poll_repeater():
+    """Manuelle Auslösung eines SNMP-Telemetrie-Polls."""
+    if not _snmp_poller:
+        raise HTTPException(503, "SNMP-Poller nicht aktiv")
+    await _snmp_poller.poll_once()
+    return get_repeater_full_state()
 
 
 @app.post("/api/hardware/ups/poll")

@@ -36,33 +36,51 @@ except ImportError:
 
 logger = logging.getLogger("snmp_trap")
 
-# ── OID-Map (Hytera HR1065 / HYTERA-REPEATER-MIB) ────────────────────────────
+# ── OID-Map (Hytera HR1065 / HYTERA-REPEATER-MIB & PowerWalker EPPC-MIB) ──────
 HYTERA_OID_MAP: Dict[str, Dict[str, str]] = {
-    # Alarm-Flags (1.3.6.1.4.1.40297.1.2.1.1.x)
-    "1.3.6.1.4.1.40297.1.2.1.1.1":  {"label": "Netzspannung fehlt",      "level": "critical"},
-    "1.3.6.1.4.1.40297.1.2.1.1.2":  {"label": "Lüfter-Alarm",            "level": "critical"},
-    "1.3.6.1.4.1.40297.1.2.1.1.3":  {"label": "Temperatur-Alarm",        "level": "warning"},
-    "1.3.6.1.4.1.40297.1.2.1.1.4":  {"label": "VSWR-Alarm (Antenne)",    "level": "critical"},
-    "1.3.6.1.4.1.40297.1.2.1.1.5":  {"label": "PA-Überhitzung",          "level": "critical"},
-    "1.3.6.1.4.1.40297.1.2.1.1.6":  {"label": "Sende-Alarm TS1",         "level": "warning"},
-    "1.3.6.1.4.1.40297.1.2.1.1.7":  {"label": "Sende-Alarm TS2",         "level": "warning"},
-    "1.3.6.1.4.1.40297.1.2.1.1.8":  {"label": "Empfangs-Alarm",          "level": "warning"},
-    "1.3.6.1.4.1.40297.1.2.1.1.9":  {"label": "GPS-Sync-Verlust",        "level": "warning"},
-    "1.3.6.1.4.1.40297.1.2.1.1.10": {"label": "Link-Verbindungsverlust", "level": "critical"},
+    # ── Hytera Alarm-Flags (1.3.6.1.4.1.40297.1.2.1.1.x)
+    "1.3.6.1.4.1.40297.1.2.1.1.1":  {"label": "Spannungs-Alarm (Unter-/Überspannung)", "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.2":  {"label": "Temperatur-Alarm (PA-Überhitzung)",     "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.3":  {"label": "Lüfter-Störung",                        "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.4":  {"label": "Vorwärtsleistungs-Alarm (TX Fwd)",       "level": "warning"},
+    "1.3.6.1.4.1.40297.1.2.1.1.5":  {"label": "Reflektierte-Leistungs-Alarm (TX Ref)",  "level": "warning"},
+    "1.3.6.1.4.1.40297.1.2.1.1.6":  {"label": "VSWR-Alarm (Antenne/Kabel defekt)",     "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.7":  {"label": "Sender PLL-Alarm (TX PLL Unlock)",      "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.8":  {"label": "Empfänger PLL-Alarm (RX PLL Unlock)",   "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.9":  {"label": "Batterie-Tiefentladungs-Alarm",         "level": "critical"},
+    "1.3.6.1.4.1.40297.1.2.1.1.10": {"label": "Link-Verbindungsverlust",               "level": "critical"},
 
-    # Performance-Messwerte (1.3.6.1.4.1.40297.1.2.1.2.x)
-    "1.3.6.1.4.1.40297.1.2.1.2.1":  {"label": "TX-Leistung (dBm)",       "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.1.2.2":  {"label": "RX-RSSI (dBm)",           "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.1.2.3":  {"label": "Innentemperatur (°C)",    "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.1.2.4":  {"label": "VSWR-Wert",               "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.1.2.5":  {"label": "Frequenzabweichung (Hz)", "level": "info"},
+    # ── Hytera Performance- & Telemetrie-Werte (1.3.6.1.4.1.40297.1.2.1.2.x)
+    "1.3.6.1.4.1.40297.1.2.1.2.1":  {"label": "Eingangsspannung (V)",                 "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.2":  {"label": "PA-Endstufentemperatur (°C)",          "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.3":  {"label": "Lüfterdrehzahl (RPM)",                 "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.4":  {"label": "Stehwellenverhältnis (VSWR)",          "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.5":  {"label": "Vorwärts-Sendeleistung (W)",           "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.6":  {"label": "Reflektierte Sendeleistung (W)",        "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.9":  {"label": "Empfangs-Feldstärke TS1 (dBm)",        "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.10": {"label": "Empfangs-Feldstärke TS2 (dBm)",        "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.11": {"label": "Versorgungsart (0=DC, 1=Batterie)",    "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.12": {"label": "Batterie-Verbindungsstatus",           "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.1.2.13": {"label": "Batteriespannung (V)",                 "level": "info"},
 
-    # System-Info (1.3.6.1.4.1.40297.1.2.4.x)
-    "1.3.6.1.4.1.40297.1.2.4.1":    {"label": "Systemname",              "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.4.2":    {"label": "Firmware-Version",        "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.4.3":    {"label": "Seriennummer",            "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.4.4":    {"label": "Modell",                  "level": "info"},
-    "1.3.6.1.4.1.40297.1.2.4.5":    {"label": "Betriebszeit (s)",        "level": "info"},
+    # ── Hytera System-Info (1.3.6.1.4.1.40297.1.2.4.x)
+    "1.3.6.1.4.1.40297.1.2.4.1":    {"label": "Seriennummer",                         "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.4.2":    {"label": "Firmware-Version",                     "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.4.3":    {"label": "Modellbezeichnung",                    "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.4.4":    {"label": "Frequenzbereich",                      "level": "info"},
+    "1.3.6.1.4.1.40297.1.2.4.5":    {"label": "Betriebszeit (s)",                     "level": "info"},
+
+    # ── PowerWalker / BlueWalker USV Traps (1.3.6.1.4.1.935.10.1.2.x - EPPC-MIB)
+    "1.3.6.1.4.1.935.10.1.2.1":     {"label": "USV Stromausfall (Batteriebetrieb)",   "level": "critical"},
+    "1.3.6.1.4.1.935.10.1.2.2":     {"label": "USV Batterie fast leer (<20%)",        "level": "critical"},
+    "1.3.6.1.4.1.935.10.1.2.3":     {"label": "USV Überlastung",                      "level": "critical"},
+    "1.3.6.1.4.1.935.10.1.2.4":     {"label": "USV Übertemperatur",                   "level": "warning"},
+    "1.3.6.1.4.1.935.10.1.2.5":     {"label": "USV Bypass aktiv",                     "level": "warning"},
+    "1.3.6.1.4.1.935.10.1.2.6":     {"label": "USV Gerätefehler",                     "level": "critical"},
+
+    # ── RFC 1628 Standard UPS-MIB Traps (1.3.6.1.2.1.33.1.6.3.x)
+    "1.3.6.1.2.1.33.1.6.3.1":       {"label": "USV Netzausfall (RFC 1628)",          "level": "critical"},
+    "1.3.6.1.2.1.33.1.6.3.3":       {"label": "USV Alarmzustand eingetreten",         "level": "warning"},
 }
 
 # Standard OID-Felder aus SNMP-v2-PDU

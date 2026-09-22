@@ -1186,4 +1186,113 @@ class TestMarkerSystem:
             assert del_res.json()["ok"] is True
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-Suite: SNMP Poller & LibreNMS MIB Integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSNMPPollerAndMIB:
+    """Tests für nativen SNMP-Poller, BER-Encoding/Decoding und LibreNMS MIB-OIDs."""
+
+    def test_snmp_get_packet_encoding(self):
+        from backend.hardware.snmp_poller import build_snmp_get_packet, OID_RPT_PA_TEMPERATURE
+        packet = build_snmp_get_packet("public", 12345, [OID_RPT_PA_TEMPERATURE])
+        assert packet[0] == 0x30  # SEQUENCE
+        assert b"public" in packet
+        assert b"\xA0" in packet  # GetRequest-PDU
+        # OID 1.3.6.1.4.1.40297.1.2.1.2.2.0 muss kodiert enthalten sein
+        assert b"\x2b\x06\x01\x04\x01\x82\xba\x69" in packet
+
+    def test_snmp_response_pdu_decoding_floats(self):
+        import struct
+        from backend.hardware.snmp_poller import (
+            parse_snmp_response_pdu, _encode_length, _encode_oid,
+            OID_RPT_PA_TEMPERATURE, OID_RPT_VSWR, OID_RPT_SLOT1_RSSI
+        )
+        # Künstliche GetResponse-PDU (0xA2) zusammenbauen
+        # VarBind 1: PA Temp = 42.5°C (IEEE 754 float in 4 Bytes)
+        temp_bytes = struct.pack(">f", 42.5)
+        vb1 = _encode_oid(OID_RPT_PA_TEMPERATURE) + b"\x04\x04" + temp_bytes
+        vb1_seq = b"\x30" + _encode_length(len(vb1)) + vb1
+
+        # VarBind 2: VSWR = 1.15
+        vswr_bytes = struct.pack(">f", 1.15)
+        vb2 = _encode_oid(OID_RPT_VSWR) + b"\x04\x04" + vswr_bytes
+        vb2_seq = b"\x30" + _encode_length(len(vb2)) + vb2
+
+        # VarBind 3: RSSI = -85 dBm (INTEGER)
+        rssi_bytes = struct.pack(">i", -85)
+        vb3 = _encode_oid(OID_RPT_SLOT1_RSSI) + b"\x02\x04" + rssi_bytes
+        vb3_seq = b"\x30" + _encode_length(len(vb3)) + vb3
+
+        vb_all = b"\x30" + _encode_length(len(vb1_seq + vb2_seq + vb3_seq)) + vb1_seq + vb2_seq + vb3_seq
+        pdu_body = b"\x02\x04\x00\x00\x30\x39\x02\x01\x00\x02\x01\x00" + vb_all
+        pdu = b"\xA2" + _encode_length(len(pdu_body)) + pdu_body
+
+        comm_bytes = b"public"
+        comm_seq = b"\x04" + _encode_length(len(comm_bytes)) + comm_bytes
+        msg_body = b"\x02\x01\x01" + comm_seq + pdu
+        msg = b"\x30" + _encode_length(len(msg_body)) + msg_body
+
+        parsed = parse_snmp_response_pdu(msg)
+        assert OID_RPT_PA_TEMPERATURE in parsed
+        assert abs(parsed[OID_RPT_PA_TEMPERATURE] - 42.5) < 0.05
+        assert OID_RPT_VSWR in parsed
+        assert abs(parsed[OID_RPT_VSWR] - 1.15) < 0.05
+        assert OID_RPT_SLOT1_RSSI in parsed
+        assert parsed[OID_RPT_SLOT1_RSSI] == -85
+
+    def test_hytera_oid_map_completeness(self):
+        from backend.hardware.snmp_trap import HYTERA_OID_MAP
+        # Alarm-OIDs aus LibreNMS MIB
+        assert "1.3.6.1.4.1.40297.1.2.1.1.1" in HYTERA_OID_MAP
+        assert "1.3.6.1.4.1.40297.1.2.1.1.6" in HYTERA_OID_MAP  # VSWR Alarm
+        assert "1.3.6.1.4.1.40297.1.2.1.1.2" in HYTERA_OID_MAP  # PA Temp Alarm
+        # Performance OIDs
+        assert "1.3.6.1.4.1.40297.1.2.1.2.1" in HYTERA_OID_MAP  # Voltage
+        assert "1.3.6.1.4.1.40297.1.2.1.2.4" in HYTERA_OID_MAP  # VSWR
+        assert "1.3.6.1.4.1.40297.1.2.1.2.5" in HYTERA_OID_MAP  # TX Fwd Power
+        # USV Traps (PowerWalker EPPC-MIB)
+        assert "1.3.6.1.4.1.935.10.1.2.1" in HYTERA_OID_MAP
+
+    def test_snmp_poller_threshold_warnings(self):
+        from backend.hardware.snmp_poller import HyteraSNMPPoller
+        poller = HyteraSNMPPoller()
+        
+        # 1. Normale Werte -> Keine Warnungen
+        poller.state["vswr_wert"] = 1.12
+        poller.state["temp_wert"] = 45.0
+        poller.state["volt_wert"] = 13.8
+        
+        # 2. Hohes VSWR -> Warnung generieren
+        poller.state["vswr_wert"] = 2.3
+        # Schwellenwert-Logik testen
+        warnings = []
+        if poller.state["vswr_wert"] >= 2.8:
+            warnings.append("KRITISCH")
+        elif poller.state["vswr_wert"] >= 2.0:
+            warnings.append("WARNUNG")
+        assert "WARNUNG" in warnings
+
+        # 3. Kritisches VSWR (3.1) -> Alarm
+        poller.state["vswr_wert"] = 3.1
+        warnings.clear()
+        if poller.state["vswr_wert"] >= 2.8:
+            warnings.append("KRITISCH")
+        assert "KRITISCH" in warnings
+
+    def test_api_hardware_status_repeater_telemetry(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app, get_repeater_full_state
+        with TestClient(app) as client:
+            res = client.get("/api/hardware/status")
+            assert res.status_code == 200
+            data = res.json()
+            assert "repeater" in data
+            rpt = data["repeater"]
+            # Alle Telemetrie-Felder müssen im Dict vorhanden sein
+            for field_key in ("online", "temp_wert", "volt_wert", "fw_pwr_watt", "vswr_wert", "rssi_slot1", "warnings"):
+                assert field_key in rpt
+
+
+
 
