@@ -13,6 +13,7 @@ Dieses Repository umfasst die vollständige Software-Suite zur Anbindung, Überw
 | **[`hytera_project/`](./hytera_project)** | 🔵 Desktop-Basis | Ursprünglicher Tkinter-Dispatcher mit NAI/HSTRP-Protokollstack, PyAudio Live-Wiedergabe und ausführlicher technischer Referenz ([`DOKUMENTATION.md`](./hytera_project/DOKUMENTATION.md)). |
 | **[`map_module/`](./map_module)** | 🟡 Modul | Standalone-Lagekartenmodul mit Georeferenzierung von Feuerwehrlaufkarten und PDF-Overlays. |
 | **[`tablet_recorder/`](./tablet_recorder)** | 📱 Mobil | Flutter-basierte mobile App für Begleit-Tablets im Einsatzfahrzeug. |
+| **[`GESPRAECH_2026-09-22.md`](./GESPRAECH_2026-09-22.md)** | 📝 Protokoll | Gesprächs- & Entwicklungsdokumentation vom 22.09.2026 (Historie, GitHub-Repo, LibreNMS-Integration). |
 
 ---
 
