@@ -129,8 +129,9 @@ _audio_recorder: Optional[AudioRecorder]   = None
 
 def get_repeater_full_state() -> Dict[str, Any]:
     """
-    Führt passiven SNMP-Trap-Monitor-Status und aktive Poller-Messwerte
-    (PA-Temperatur, VSWR, Leistung, Spannung, RSSI) zu einem konsolidierten Status zusammen.
+    Führt passiven SNMP-Trap-Monitor-Status und alle aktiven Poller-Messwerte
+    (RF-Telemetrie, Frequenzen, Kanal, Sendeleistung, Identifikation, Alarme)
+    zu einem lückenlosen Gesamtzustand zusammen.
     """
     state: Dict[str, Any] = {
         "online":            False,
@@ -139,19 +140,6 @@ def get_repeater_full_state() -> Dict[str, Any]:
         "last_trap_ts":      None,
         "last_alarm":        None,
         "active_alarms":     [],
-        "temp_wert":         None,
-        "volt_wert":         None,
-        "fw_pwr_watt":       None,
-        "ref_pwr_watt":      None,
-        "vswr_wert":         None,
-        "fan_speed":         None,
-        "rssi_slot1":        None,
-        "rssi_slot2":        None,
-        "power_source":      "DC",
-        "battery_connected": True,
-        "serial_number":     "",
-        "firmware_version":  "",
-        "model_name":        "Hytera HR1065",
         "warnings":          [],
     }
     if _snmp_monitor:
@@ -160,14 +148,17 @@ def get_repeater_full_state() -> Dict[str, Any]:
         poll_st = _snmp_poller.get_telemetry_dict()
         if poll_st.get("online"):
             state["online"] = True
-        for k in (
-            "temp_wert", "volt_wert", "fw_pwr_watt", "ref_pwr_watt",
-            "vswr_wert", "fan_speed", "rssi_slot1", "rssi_slot2",
-            "power_source", "battery_connected", "warnings",
-            "serial_number", "firmware_version", "model_name",
-        ):
-            if poll_st.get(k) is not None:
-                state[k] = poll_st[k]
+        for k, v in poll_st.items():
+            if v is not None or k not in state:
+                state[k] = v
+        # Alarme zusammenführen
+        poller_alarms = poll_st.get("active_alarms", [])
+        if poller_alarms:
+            merged = list(state.get("active_alarms", []))
+            for a in poller_alarms:
+                if a not in merged:
+                    merged.append(a)
+            state["active_alarms"] = merged
     return state
 
 

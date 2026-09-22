@@ -1,16 +1,30 @@
 """
-Hytera Command Center – Aktiver SNMP Poller (Hytera HR1065 / LibreNMS MIB)
-Fragt periodisch (alle 30s) Telemetrie- und Leistungswerte direkt vom Repeater
-via SNMPv1/SNMPv2c (UDP Port 161) ab:
-  - PA-Endstufentemperatur (rptPaTemprature)
-  - Stehwellenverhältnis VSWR (rptVswr)
-  - Vorwärts- und reflektierte Sendeleistung (rptTxFwdPower, rptTxRefPower)
-  - Betriebsspannung (rptVoltage)
-  - Empfangsfeldstärke TS1 / TS2 (rptSlot1Rssi, rptSlot2Rssi)
-  - Stromversorgung (DC vs. Batterie)
-  - Lüfterdrehzahl und Modell-Identifikation
-
-Reine Python-Implementierung (BER/DER) ohne externe C-Bibliotheken.
+Hytera Command Center – Vollständiger SNMP Poller (Hytera HR1065 / LibreNMS MIB)
+Liest alle verfügbaren Parameter und Leistungsmerkmale des Repeaters aus:
+  1. Live RF & Telemetrie:
+     - PA-Endstufentemperatur (rptPaTemprature)
+     - Stehwellenverhältnis VSWR (rptVswr)
+     - Vorwärts- und reflektierte Sendeleistung (rptTxFwdPower, rptTxRefPower)
+     - Betriebsspannung & Batteriespannung (rptVoltage, rptBatteryVoltage)
+     - Empfangsfeldstärke TS1 & TS2 (rptSlot1Rssi, rptSlot2Rssi)
+     - Lüfterdrehzahl (rptFanSpeed)
+     - Arbeitszustand Standby / TX / RX (rptWorkState)
+     - Stromversorgung: Netzteil DC vs. Notstrom-Batterie (rptSupplyPowerType, rptBatteryConnect)
+  2. Kanal- & HF-Parameter:
+     - Aktueller Kanalname (rptChannelName) & Kanalnummer (rptChannelNumber)
+     - Zonenbezeichnung (rptCurZoneAlias)
+     - Kanaltyp (rptCurChannelType: Digital DMR, Analog, Mixed)
+     - TX-Sendefrequenz & RX-Empfangsfrequenz in MHz (rptCurTxFreq, rptCurRxFreq)
+     - Sendeleistungsstufe High/Low (rptTxPowerLevel)
+  3. Geräte-Identifikation & System:
+     - Modellname & Modellnummer (rptModelName, rptModelNo)
+     - Firmware- & RCDB-Version (rptFirmwareVersion, rptRcdbVersion)
+     - Seriennummer (rptSerialNo)
+     - Repeater DMR-ID (rptRadioID)
+     - Repeater Funkrufname (rptRadioAlias)
+     - Betriebszeit / Uptime (sysUpTime)
+  4. Aktive Hardware-Schutzalarme:
+     - Überspannung/Unterspannung, Übertemperatur, Lüfter, VSWR, PLL-Lock
 """
 
 import asyncio
@@ -18,7 +32,6 @@ import logging
 import socket
 import struct
 import time
-from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple
 
 try:
@@ -50,24 +63,52 @@ except ImportError:
 
 logger = logging.getLogger("snmp_poller")
 
-# ── Hytera MIB OID-Definitionen (HYTERA-REPEATER-MIB) ──────────────────────────
-# Basis: 1.3.6.1.4.1.40297.1.2 (hyteraRepeaterMIB.product.repeater)
-OID_RPT_VOLTAGE          = "1.3.6.1.4.1.40297.1.2.1.2.1.0"   # OCTET STRING (float)
-OID_RPT_PA_TEMPERATURE   = "1.3.6.1.4.1.40297.1.2.1.2.2.0"   # OCTET STRING (float)
+# ── Vollständige Hytera MIB OID-Katalogisierung ────────────────────────────────
+# 1. Telemetrie & HF-Messwerte (1.3.6.1.4.1.40297.1.2.1.2.x)
+OID_RPT_VOLTAGE          = "1.3.6.1.4.1.40297.1.2.1.2.1.0"   # OCTET STRING (float V)
+OID_RPT_PA_TEMPERATURE   = "1.3.6.1.4.1.40297.1.2.1.2.2.0"   # OCTET STRING (float °C)
 OID_RPT_FAN_SPEED        = "1.3.6.1.4.1.40297.1.2.1.2.3.0"   # INTEGER (RPM)
 OID_RPT_VSWR             = "1.3.6.1.4.1.40297.1.2.1.2.4.0"   # OCTET STRING (float)
-OID_RPT_TX_FWD_POWER     = "1.3.6.1.4.1.40297.1.2.1.2.5.0"   # OCTET STRING (float)
-OID_RPT_TX_REF_POWER     = "1.3.6.1.4.1.40297.1.2.1.2.6.0"   # OCTET STRING (float)
+OID_RPT_TX_FWD_POWER     = "1.3.6.1.4.1.40297.1.2.1.2.5.0"   # OCTET STRING (float W)
+OID_RPT_TX_REF_POWER     = "1.3.6.1.4.1.40297.1.2.1.2.6.0"   # OCTET STRING (float W)
 OID_RPT_SLOT1_RSSI       = "1.3.6.1.4.1.40297.1.2.1.2.9.0"   # INTEGER (dBm)
 OID_RPT_SLOT2_RSSI       = "1.3.6.1.4.1.40297.1.2.1.2.10.0"  # INTEGER (dBm)
 OID_RPT_POWER_TYPE       = "1.3.6.1.4.1.40297.1.2.1.2.11.0"  # INTEGER (0=DC, 1=Battery)
 OID_RPT_BATTERY_CONNECT  = "1.3.6.1.4.1.40297.1.2.1.2.12.0"  # INTEGER (0=disc, 1=conn)
-OID_RPT_SERIAL_NUMBER    = "1.3.6.1.4.1.40297.1.2.4.1.0"     # DisplayString
-OID_RPT_FIRMWARE_VER     = "1.3.6.1.4.1.40297.1.2.4.2.0"     # DisplayString
-OID_RPT_MODEL_NAME       = "1.3.6.1.4.1.40297.1.2.4.3.0"     # DisplayString
+OID_RPT_BATTERY_VOLT     = "1.3.6.1.4.1.40297.1.2.1.2.13.0"  # OCTET STRING (float V)
 
-# Gruppe der regelmäßig abgefragten OIDs
-TELEMETRY_OIDS: List[str] = [
+# 2. Kanal- & Betriebsstatus (1.3.6.1.4.1.40297.1.2.4.x & Control .2.x)
+OID_RPT_CHANNEL_TYPE     = "1.3.6.1.4.1.40297.1.2.4.8.0"     # INTEGER (0=DMR, 1=Analog, 2=Mixed)
+OID_RPT_CHANNEL_NAME     = "1.3.6.1.4.1.40297.1.2.4.9.0"     # OCTET STRING (Name)
+OID_RPT_TX_FREQ          = "1.3.6.1.4.1.40297.1.2.4.10.0"    # INTEGER (Hz)
+OID_RPT_RX_FREQ          = "1.3.6.1.4.1.40297.1.2.4.11.0"    # INTEGER (Hz)
+OID_RPT_WORK_STATE       = "1.3.6.1.4.1.40297.1.2.4.12.0"    # INTEGER (0=RX/Standby, 1=TX)
+OID_RPT_ZONE_ALIAS       = "1.3.6.1.4.1.40297.1.2.4.13.0"    # OCTET STRING (Zone)
+OID_RPT_CHANNEL_NUM      = "1.3.6.1.4.1.40297.1.2.2.2.0"     # INTEGER (0..15)
+OID_RPT_TX_POWER_LVL     = "1.3.6.1.4.1.40297.1.2.2.5.0"     # INTEGER (0=High, 2=Low)
+
+# 3. Geräte-Identifikation (1.3.6.1.4.1.40297.1.2.4.x & MIB-2)
+OID_RPT_MODEL_NAME       = "1.3.6.1.4.1.40297.1.2.4.1.0"     # OCTET STRING
+OID_RPT_MODEL_NO         = "1.3.6.1.4.1.40297.1.2.4.2.0"     # OCTET STRING
+OID_RPT_FIRMWARE_VER     = "1.3.6.1.4.1.40297.1.2.4.3.0"     # OCTET STRING
+OID_RPT_RCDB_VER         = "1.3.6.1.4.1.40297.1.2.4.4.0"     # OCTET STRING
+OID_RPT_SERIAL_NO        = "1.3.6.1.4.1.40297.1.2.4.5.0"     # OCTET STRING
+OID_RPT_RADIO_ALIAS      = "1.3.6.1.4.1.40297.1.2.4.6.0"     # OCTET STRING
+OID_RPT_RADIO_ID         = "1.3.6.1.4.1.40297.1.2.4.7.0"     # INTEGER
+OID_SYS_UPTIME           = "1.3.6.1.2.1.1.3.0"               # TimeTicks
+
+# 4. Hardware-Alarme (1.3.6.1.4.1.40297.1.2.1.1.x)
+OID_ALARM_VOLTAGE        = "1.3.6.1.4.1.40297.1.2.1.1.1.0"   # INTEGER (0=norm, 1=low, 2=high)
+OID_ALARM_TEMP           = "1.3.6.1.4.1.40297.1.2.1.1.2.0"   # INTEGER (0=norm, 1=low, 2=high)
+OID_ALARM_FAN            = "1.3.6.1.4.1.40297.1.2.1.1.3.0"   # INTEGER (0=norm, 1=alarm)
+OID_ALARM_FWD_PWR        = "1.3.6.1.4.1.40297.1.2.1.1.4.0"   # INTEGER (0=norm, 1=alarm)
+OID_ALARM_REF_PWR        = "1.3.6.1.4.1.40297.1.2.1.1.5.0"   # INTEGER (0=norm, 1=alarm)
+OID_ALARM_VSWR           = "1.3.6.1.4.1.40297.1.2.1.1.6.0"   # INTEGER (0=norm, 1=alarm)
+OID_ALARM_TX_PLL         = "1.3.6.1.4.1.40297.1.2.1.1.7.0"   # INTEGER (0=norm, 1=alarm)
+OID_ALARM_RX_PLL         = "1.3.6.1.4.1.40297.1.2.1.1.8.0"   # INTEGER (0=norm, 1=alarm)
+
+# Abfrage-Batches zur Vermeidung von UDP-Fragmentierung
+BATCH_TELEMETRY = [
     OID_RPT_VOLTAGE,
     OID_RPT_PA_TEMPERATURE,
     OID_RPT_FAN_SPEED,
@@ -78,19 +119,38 @@ TELEMETRY_OIDS: List[str] = [
     OID_RPT_SLOT2_RSSI,
     OID_RPT_POWER_TYPE,
     OID_RPT_BATTERY_CONNECT,
+    OID_RPT_BATTERY_VOLT,
 ]
 
-SYSTEM_INFO_OIDS: List[str] = [
-    OID_RPT_SERIAL_NUMBER,
-    OID_RPT_FIRMWARE_VER,
+BATCH_CHANNEL_AND_ALARMS = [
+    OID_RPT_CHANNEL_NAME,
+    OID_RPT_ZONE_ALIAS,
+    OID_RPT_CHANNEL_NUM,
+    OID_RPT_CHANNEL_TYPE,
+    OID_RPT_TX_FREQ,
+    OID_RPT_RX_FREQ,
+    OID_RPT_WORK_STATE,
+    OID_RPT_TX_POWER_LVL,
+    OID_ALARM_VOLTAGE,
+    OID_ALARM_TEMP,
+    OID_ALARM_FAN,
+    OID_ALARM_VSWR,
+]
+
+BATCH_SYSTEM_INFO = [
     OID_RPT_MODEL_NAME,
+    OID_RPT_FIRMWARE_VER,
+    OID_RPT_RCDB_VER,
+    OID_RPT_SERIAL_NO,
+    OID_RPT_RADIO_ALIAS,
+    OID_RPT_RADIO_ID,
+    OID_SYS_UPTIME,
 ]
 
 
-# ── BER / SNMPv2c Encoder & Decoder ──────────────────────────────────────────
+# ── ASN.1 BER Hilfsfunktionen ────────────────────────────────────────────────
 
 def _encode_length(length: int) -> bytes:
-    """Kodiert eine ASN.1 BER-Länge."""
     if length < 0x80:
         return bytes([length])
     octets = []
@@ -102,7 +162,6 @@ def _encode_length(length: int) -> bytes:
 
 
 def _encode_oid(oid_str: str) -> bytes:
-    """Kodiert eine OID in ASN.1 BER-Format."""
     subids = [int(x) for x in oid_str.strip(".").split(".")]
     if len(subids) < 2:
         return b"\x06\x00"
@@ -123,24 +182,16 @@ def _encode_oid(oid_str: str) -> bytes:
 
 
 def build_snmp_get_packet(community: str, request_id: int, oids: List[str]) -> bytes:
-    """
-    Erstellt ein standardkonformes SNMPv2c GetRequest-Paket.
-    """
-    # VarBind-Liste erstellen
     varbinds = b""
     for oid_str in oids:
-        # VarBind: SEQUENCE { name ObjectIdentifier, value NULL }
         vb_content = _encode_oid(oid_str) + b"\x05\x00"
         varbinds += b"\x30" + _encode_length(len(vb_content)) + vb_content
 
     vb_seq = b"\x30" + _encode_length(len(varbinds)) + varbinds
-
-    # GetRequest-PDU (0xA0): [request-id INTEGER, error-status INTEGER 0, error-index INTEGER 0, varbinds]
     req_id_bytes = struct.pack(">I", request_id & 0x7FFFFFFF)
     pdu_body = b"\x02\x04" + req_id_bytes + b"\x02\x01\x00\x02\x01\x00" + vb_seq
     pdu = b"\xA0" + _encode_length(len(pdu_body)) + pdu_body
 
-    # SNMP Message: SEQUENCE { version INTEGER (1=v2c), community OCTET STRING, data PDU }
     comm_bytes = community.encode("latin-1", errors="replace")
     comm_seq = b"\x04" + _encode_length(len(comm_bytes)) + comm_bytes
     msg_body = b"\x02\x01\x01" + comm_seq + pdu
@@ -148,7 +199,6 @@ def build_snmp_get_packet(community: str, request_id: int, oids: List[str]) -> b
 
 
 def _decode_length(data: bytes, offset: int) -> Tuple[int, int]:
-    """Liest Länge und neuen Offset aus ASN.1 BER-Daten."""
     if offset >= len(data):
         return 0, offset
     first = data[offset]
@@ -163,7 +213,6 @@ def _decode_length(data: bytes, offset: int) -> Tuple[int, int]:
 
 
 def _decode_oid(data: bytes) -> str:
-    """Dekodiert ASN.1 BER-OID zu Punkt-Notation."""
     if len(data) < 1:
         return ""
     result = [str(data[0] // 40), str(data[0] % 40)]
@@ -179,32 +228,42 @@ def _decode_oid(data: bytes) -> str:
     return ".".join(result)
 
 
+def decode_string_value(val_bytes: bytes) -> str:
+    """Dekodiert Hytera Unicode (UTF-16LE), UTF-8 oder Latin-1 Strings sauber."""
+    if len(val_bytes) >= 2 and val_bytes[1] == 0:
+        try:
+            s16 = val_bytes.decode("utf-16-le").strip("\x00").strip()
+            if s16.isprintable() and len(s16) > 0:
+                return s16
+        except Exception:
+            pass
+    try:
+        s8 = val_bytes.decode("utf-8").strip("\x00").strip()
+        if s8.isprintable() and len(s8) > 0:
+            return s8
+    except Exception:
+        pass
+    return val_bytes.decode("latin-1", errors="replace").strip("\x00").strip()
+
+
 def parse_snmp_response_pdu(data: bytes) -> Dict[str, Any]:
-    """
-    Parst eine SNMP GetResponse-PDU (0xA2).
-    Gibt ein Wörterbuch {oid_str: value} zurück.
-    """
     result: Dict[str, Any] = {}
     try:
         if not data or data[0] != 0x30:
             return result
 
         _, offset = _decode_length(data, 1)
-
-        # Version
         if data[offset] != 0x02:
             return result
         vlen, offset = _decode_length(data, offset + 1)
         offset += vlen
 
-        # Community
         if data[offset] != 0x04:
             return result
         clen, offset = _decode_length(data, offset + 1)
         offset += clen
 
-        # PDU-Typ (GetResponse = 0xA2)
-        if data[offset] != 0xA2:
+        if data[offset] != 0xA2:  # GetResponse-PDU
             return result
         _, offset = _decode_length(data, offset + 1)
 
@@ -214,14 +273,13 @@ def parse_snmp_response_pdu(data: bytes) -> Dict[str, Any]:
         rlen, offset = _decode_length(data, offset + 1)
         offset += rlen
 
-        # Error-Status (0 = noError)
+        # Error-Status
         if data[offset] != 0x02:
             return result
         elen, offset = _decode_length(data, offset + 1)
         err_status = int.from_bytes(data[offset:offset + elen], "big")
         offset += elen
         if err_status != 0:
-            logger.debug(f"SNMP Response Error-Status: {err_status}")
             return result
 
         # Error-Index
@@ -230,18 +288,16 @@ def parse_snmp_response_pdu(data: bytes) -> Dict[str, Any]:
         ilen, offset = _decode_length(data, offset + 1)
         offset += ilen
 
-        # VarBind-Liste (SEQUENCE 0x30)
+        # VarBind-Liste
         if offset >= len(data) or data[offset] != 0x30:
             return result
         _, offset = _decode_length(data, offset + 1)
 
-        # Einzelne VarBinds durchlaufen
         while offset < len(data):
             if data[offset] != 0x30:
                 break
             _, offset = _decode_length(data, offset + 1)
 
-            # OID Tag (0x06)
             if offset >= len(data) or data[offset] != 0x06:
                 break
             oid_len, offset = _decode_length(data, offset + 1)
@@ -256,33 +312,27 @@ def parse_snmp_response_pdu(data: bytes) -> Dict[str, Any]:
             val_bytes = data[offset:offset + val_len]
             offset += val_len
 
-            # Wert typgerecht konvertieren
             val: Any = None
             if val_tag == 0x02:  # INTEGER
                 val = int.from_bytes(val_bytes, "big", signed=True)
-            elif val_tag == 0x04:  # OCTET STRING (oft IEEE Float oder String)
-                if len(val_bytes) == 4:
-                    # MIB-Spezifikation: rptVoltage, rptPaTemprature, rptVswr, rptTxFwdPower
-                    # sind 4-Byte Floats
+            elif val_tag == 0x04:  # OCTET STRING (Float oder String)
+                if len(val_bytes) == 4 and any(
+                    k in oid_str for k in ("1.2.1.2.1.", "1.2.1.2.2.", "1.2.1.2.4.", "1.2.1.2.5.", "1.2.1.2.6.", "1.2.1.2.13.")
+                ):
                     try:
-                        # Zuerst Big-Endian (Standard-Netzwerk-Reihenfolge) versuchen
                         f_val = struct.unpack(">f", val_bytes)[0]
-                        # Plausibilitäts-Check: -100 <= x <= 10000
                         if -100.0 <= f_val <= 10000.0:
                             val = round(f_val, 2)
                         else:
-                            f_val_le = struct.unpack("<f", val_bytes)[0]
-                            val = round(f_val_le, 2) if -100.0 <= f_val_le <= 10000.0 else val_bytes.hex()
+                            f_le = struct.unpack("<f", val_bytes)[0]
+                            val = round(f_le, 2) if -100.0 <= f_le <= 10000.0 else f_val
                     except Exception:
-                        val = val_bytes.decode("latin-1", errors="replace")
+                        val = decode_string_value(val_bytes)
                 else:
-                    try:
-                        val = val_bytes.decode("utf-8").strip("\x00").strip()
-                    except UnicodeDecodeError:
-                        val = val_bytes.decode("latin-1", errors="replace").strip("\x00").strip()
-            elif val_tag in (0x40, 0x41, 0x42, 0x43):  # Gauge32 / Counter32 / TimeTicks
+                    val = decode_string_value(val_bytes)
+            elif val_tag in (0x40, 0x41, 0x42, 0x43):  # Gauge / Counter / TimeTicks
                 val = int.from_bytes(val_bytes, "big")
-            elif val_tag == 0x05:  # NULL
+            elif val_tag == 0x05:
                 val = None
             else:
                 val = val_bytes.hex()
@@ -290,17 +340,30 @@ def parse_snmp_response_pdu(data: bytes) -> Dict[str, Any]:
             result[oid_str] = val
 
     except Exception as exc:
-        logger.debug(f"SNMP Response Parse-Fehler: {exc}")
+        logger.debug(f"SNMP Parse Fehler: {exc}")
 
     return result
+
+
+def format_uptime(timeticks: Optional[int]) -> str:
+    """Formatiert TimeTicks (1/100 s) in menschenlesbare Tage/Stunden/Minuten."""
+    if timeticks is None or timeticks <= 0:
+        return "—"
+    total_seconds = timeticks // 100
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        return f"{days}d {hours:02d}h {minutes:02d}m"
+    return f"{hours:02d}h {minutes:02d}m"
 
 
 # ── HyteraSNMPPoller Klasse ───────────────────────────────────────────────────
 
 class HyteraSNMPPoller:
     """
-    Asynchroner Poller für die Live-Hardware-Telemetrie des Hytera HR1065 Repeaters.
-    Fragt periodisch alle Telemetrie-OIDs ab und liefert formatierte Messwerte.
+    Asynchroner Poller für die vollständige Live-Hardware-Telemetrie
+    des Hytera HR1065 Repeaters via SNMPv1/v2c.
     """
 
     def __init__(
@@ -321,35 +384,58 @@ class HyteraSNMPPoller:
         self._request_id    = 1000
         self._last_poll_ts: Optional[float] = None
         self._last_success_ts: Optional[float] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._task: Optional[asyncio.Task] = None
+        self._poll_cycle    = 0
 
-        # Telemetrie-State (wird für WebSocket & REST vorgehalten)
+        # Vollständiger Telemetrie-State
         self.state: Dict[str, Any] = {
+            # 1. Verbindungsstatus
             "online":            False,
             "last_poll_ts":      None,
-            "temp_wert":         None,   # °C
-            "volt_wert":         None,   # V
-            "fw_pwr_watt":       None,   # W
-            "ref_pwr_watt":      None,   # W
-            "vswr_wert":         None,   # Ratio
-            "fan_speed":         None,   # RPM
-            "rssi_slot1":        None,   # dBm
-            "rssi_slot2":        None,   # dBm
-            "power_source":      "DC",   # "DC" | "Batterie"
-            "battery_connected": True,
-            "serial_number":     "",
-            "firmware_version":  "",
-            "model_name":        "Hytera HR1065",
-            "warnings":          [],
             "poll_count":        0,
             "error_count":       0,
+
+            # 2. HF- & Live-Messwerte
+            "temp_wert":         None,   # PA-Temperatur (°C)
+            "volt_wert":         None,   # Betriebsspannung (V)
+            "batt_volt_wert":    None,   # Akku-Spannung (V)
+            "fw_pwr_watt":       None,   # Vorwärtsleistung (W)
+            "ref_pwr_watt":      None,   # Reflektierte Leistung (W)
+            "vswr_wert":         None,   # Stehwellenverhältnis
+            "fan_speed":         None,   # Lüfter (RPM)
+            "rssi_slot1":        None,   # Empfangspegel TS1 (dBm)
+            "rssi_slot2":        None,   # Empfangspegel TS2 (dBm)
+            "power_source":      "DC Netzteil", # "DC Netzteil" | "Notstrom-Batterie"
+            "battery_connected": True,
+
+            # 3. Kanal- & Betriebs-Parameter
+            "channel_name":      "—",    # z.B. "Kanal 1 TS1/2"
+            "zone_alias":        "—",    # z.B. "Einsatz Zone 1"
+            "channel_num":       1,
+            "channel_type":      "Digital (DMR)", # Digital / Analog / Mixed
+            "tx_freq_mhz":       None,   # z.B. 438.8250 MHz
+            "rx_freq_mhz":       None,   # z.B. 431.2250 MHz
+            "work_state":        0,      # 0=Standby/RX, 1=TX
+            "work_state_str":    "Standby",
+            "tx_power_level":    "High Power (50W)",
+
+            # 4. Geräte-Identifikation & System
+            "model_name":        "Hytera HR1065",
+            "model_no":          "",
+            "serial_number":     "—",
+            "firmware_version":  "—",
+            "rcdb_version":      "—",
+            "radio_alias":       "—",
+            "radio_id":          None,
+            "uptime_str":        "—",
+            "uptime_raw":        0,
+
+            # 5. Diagnose & Alarme
+            "warnings":          [],
+            "active_alarms":     [],
         }
 
     def get_telemetry_dict(self) -> Dict[str, Any]:
-        """Gibt eine Kopie des aktuellen Telemetrie-Status zurück."""
         st = dict(self.state)
-        # Online wenn erfolgreicher Poll innerhalb des doppelten Intervalls
         is_online = (
             self._last_success_ts is not None
             and (time.time() - self._last_success_ts) < (self.interval_s * 2.5)
@@ -362,86 +448,147 @@ class HyteraSNMPPoller:
         return self._request_id
 
     async def poll_once(self) -> Dict[str, Any]:
-        """
-        Führt eine einzelne SNMP-Abfragerunde durch (nicht-blockierend via asyncio).
-        """
-        req_id = self._next_request_id()
-        packet = build_snmp_get_packet(self.community, req_id, TELEMETRY_OIDS)
-
+        """Führt eine mehrstufige SNMP-Abfragerunde für alle Telemetrie- und Identitäts-OIDs durch."""
         loop = asyncio.get_running_loop()
-        resp_data = await loop.run_in_executor(
-            None, self._send_and_receive, packet
-        )
+        self._poll_cycle += 1
+
+        # 1. Telemetrie & Leistungswerte abfragen
+        p1 = build_snmp_get_packet(self.community, self._next_request_id(), BATCH_TELEMETRY)
+        resp1 = await loop.run_in_executor(None, self._send_and_receive, p1)
+
+        # 2. Kanal- und Schutzstatus abfragen
+        p2 = build_snmp_get_packet(self.community, self._next_request_id(), BATCH_CHANNEL_AND_ALARMS)
+        resp2 = await loop.run_in_executor(None, self._send_and_receive, p2)
+
+        # 3. System-Info (Initial oder alle 5 Zyklen)
+        resp3 = None
+        if self._poll_cycle == 1 or self._poll_cycle % 5 == 0:
+            p3 = build_snmp_get_packet(self.community, self._next_request_id(), BATCH_SYSTEM_INFO)
+            resp3 = await loop.run_in_executor(None, self._send_and_receive, p3)
 
         self._last_poll_ts = time.time()
         self.state["last_poll_ts"] = self._last_poll_ts
         self.state["poll_count"] += 1
 
-        if not resp_data:
+        parsed_all: Dict[str, Any] = {}
+        if resp1: parsed_all.update(parse_snmp_response_pdu(resp1))
+        if resp2: parsed_all.update(parse_snmp_response_pdu(resp2))
+        if resp3: parsed_all.update(parse_snmp_response_pdu(resp3))
+
+        if not parsed_all:
             self.state["error_count"] += 1
-            # Wenn 3 Abfragen nacheinander fehlschlagen → offline
             if self._last_success_ts and (time.time() - self._last_success_ts) > (self.interval_s * 3):
                 self.state["online"] = False
-            return self.get_telemetry_dict()
-
-        parsed = parse_snmp_response_pdu(resp_data)
-        if not parsed:
             return self.get_telemetry_dict()
 
         self._last_success_ts = time.time()
         self.state["online"] = True
 
-        # Werte zuordnen
-        if OID_RPT_VOLTAGE in parsed:
-            v = parsed[OID_RPT_VOLTAGE]
-            if isinstance(v, (int, float)):
-                self.state["volt_wert"] = float(v)
+        # ── 1. Telemetrie parsen ─────────────────────────────────────────────
+        if OID_RPT_VOLTAGE in parsed_all and isinstance(parsed_all[OID_RPT_VOLTAGE], (int, float)):
+            self.state["volt_wert"] = float(parsed_all[OID_RPT_VOLTAGE])
 
-        if OID_RPT_PA_TEMPERATURE in parsed:
-            t = parsed[OID_RPT_PA_TEMPERATURE]
-            if isinstance(t, (int, float)):
-                self.state["temp_wert"] = float(t)
+        if OID_RPT_PA_TEMPERATURE in parsed_all and isinstance(parsed_all[OID_RPT_PA_TEMPERATURE], (int, float)):
+            self.state["temp_wert"] = float(parsed_all[OID_RPT_PA_TEMPERATURE])
 
-        if OID_RPT_FAN_SPEED in parsed:
-            f = parsed[OID_RPT_FAN_SPEED]
-            if isinstance(f, int):
-                self.state["fan_speed"] = f
+        if OID_RPT_FAN_SPEED in parsed_all and isinstance(parsed_all[OID_RPT_FAN_SPEED], int):
+            self.state["fan_speed"] = parsed_all[OID_RPT_FAN_SPEED]
 
-        if OID_RPT_VSWR in parsed:
-            vswr = parsed[OID_RPT_VSWR]
-            if isinstance(vswr, (int, float)):
-                self.state["vswr_wert"] = float(vswr)
+        if OID_RPT_VSWR in parsed_all and isinstance(parsed_all[OID_RPT_VSWR], (int, float)):
+            self.state["vswr_wert"] = float(parsed_all[OID_RPT_VSWR])
 
-        if OID_RPT_TX_FWD_POWER in parsed:
-            fwd = parsed[OID_RPT_TX_FWD_POWER]
-            if isinstance(fwd, (int, float)):
-                self.state["fw_pwr_watt"] = float(fwd)
+        if OID_RPT_TX_FWD_POWER in parsed_all and isinstance(parsed_all[OID_RPT_TX_FWD_POWER], (int, float)):
+            self.state["fw_pwr_watt"] = float(parsed_all[OID_RPT_TX_FWD_POWER])
 
-        if OID_RPT_TX_REF_POWER in parsed:
-            ref = parsed[OID_RPT_TX_REF_POWER]
-            if isinstance(ref, (int, float)):
-                self.state["ref_pwr_watt"] = float(ref)
+        if OID_RPT_TX_REF_POWER in parsed_all and isinstance(parsed_all[OID_RPT_TX_REF_POWER], (int, float)):
+            self.state["ref_pwr_watt"] = float(parsed_all[OID_RPT_TX_REF_POWER])
 
-        if OID_RPT_SLOT1_RSSI in parsed:
-            rssi1 = parsed[OID_RPT_SLOT1_RSSI]
-            if isinstance(rssi1, int):
-                self.state["rssi_slot1"] = rssi1
+        if OID_RPT_SLOT1_RSSI in parsed_all and isinstance(parsed_all[OID_RPT_SLOT1_RSSI], int):
+            self.state["rssi_slot1"] = parsed_all[OID_RPT_SLOT1_RSSI]
 
-        if OID_RPT_SLOT2_RSSI in parsed:
-            rssi2 = parsed[OID_RPT_SLOT2_RSSI]
-            if isinstance(rssi2, int):
-                self.state["rssi_slot2"] = rssi2
+        if OID_RPT_SLOT2_RSSI in parsed_all and isinstance(parsed_all[OID_RPT_SLOT2_RSSI], int):
+            self.state["rssi_slot2"] = parsed_all[OID_RPT_SLOT2_RSSI]
 
-        if OID_RPT_POWER_TYPE in parsed:
-            pt = parsed[OID_RPT_POWER_TYPE]
-            self.state["power_source"] = "Batterie" if pt == 1 else "DC"
+        if OID_RPT_POWER_TYPE in parsed_all:
+            pt = parsed_all[OID_RPT_POWER_TYPE]
+            self.state["power_source"] = "Notstrom-Batterie" if pt == 1 else "DC Netzteil"
 
-        if OID_RPT_BATTERY_CONNECT in parsed:
-            bc = parsed[OID_RPT_BATTERY_CONNECT]
-            self.state["battery_connected"] = (bc == 1)
+        if OID_RPT_BATTERY_CONNECT in parsed_all:
+            self.state["battery_connected"] = (parsed_all[OID_RPT_BATTERY_CONNECT] == 1)
 
-        # Warnungen / Schwellenwertprüfungen generieren
+        if OID_RPT_BATTERY_VOLT in parsed_all and isinstance(parsed_all[OID_RPT_BATTERY_VOLT], (int, float)):
+            self.state["batt_volt_wert"] = float(parsed_all[OID_RPT_BATTERY_VOLT])
+
+        # ── 2. Kanal & HF-Parameter parsen ──────────────────────────────────
+        if OID_RPT_CHANNEL_NAME in parsed_all and parsed_all[OID_RPT_CHANNEL_NAME]:
+            self.state["channel_name"] = str(parsed_all[OID_RPT_CHANNEL_NAME])
+
+        if OID_RPT_ZONE_ALIAS in parsed_all and parsed_all[OID_RPT_ZONE_ALIAS]:
+            self.state["zone_alias"] = str(parsed_all[OID_RPT_ZONE_ALIAS])
+
+        if OID_RPT_CHANNEL_NUM in parsed_all and isinstance(parsed_all[OID_RPT_CHANNEL_NUM], int):
+            self.state["channel_num"] = parsed_all[OID_RPT_CHANNEL_NUM] + 1  # 1-indexed
+
+        if OID_RPT_CHANNEL_TYPE in parsed_all:
+            ct = parsed_all[OID_RPT_CHANNEL_TYPE]
+            type_map = {0: "Digital (DMR)", 1: "Analog (FM)", 2: "Mixed (Auto)"}
+            self.state["channel_type"] = type_map.get(ct, "DMR")
+
+        if OID_RPT_TX_FREQ in parsed_all and isinstance(parsed_all[OID_RPT_TX_FREQ], (int, float)):
+            hz = float(parsed_all[OID_RPT_TX_FREQ])
+            self.state["tx_freq_mhz"] = round(hz / 1_000_000, 4) if hz > 1_000_000 else hz
+
+        if OID_RPT_RX_FREQ in parsed_all and isinstance(parsed_all[OID_RPT_RX_FREQ], (int, float)):
+            hz = float(parsed_all[OID_RPT_RX_FREQ])
+            self.state["rx_freq_mhz"] = round(hz / 1_000_000, 4) if hz > 1_000_000 else hz
+
+        if OID_RPT_WORK_STATE in parsed_all:
+            ws = parsed_all[OID_RPT_WORK_STATE]
+            self.state["work_state"] = ws
+            self.state["work_state_str"] = "Senden (TX)" if ws == 1 else "Standby / RX"
+
+        if OID_RPT_TX_POWER_LVL in parsed_all:
+            pl = parsed_all[OID_RPT_TX_POWER_LVL]
+            self.state["tx_power_level"] = "Low Power (25W)" if pl == 2 else "High Power (50W)"
+
+        # ── 3. Geräte-Identifikation & System ────────────────────────────────
+        if OID_RPT_MODEL_NAME in parsed_all and parsed_all[OID_RPT_MODEL_NAME]:
+            self.state["model_name"] = str(parsed_all[OID_RPT_MODEL_NAME])
+
+        if OID_RPT_SERIAL_NO in parsed_all and parsed_all[OID_RPT_SERIAL_NO]:
+            self.state["serial_number"] = str(parsed_all[OID_RPT_SERIAL_NO])
+
+        if OID_RPT_FIRMWARE_VER in parsed_all and parsed_all[OID_RPT_FIRMWARE_VER]:
+            self.state["firmware_version"] = str(parsed_all[OID_RPT_FIRMWARE_VER])
+
+        if OID_RPT_RCDB_VER in parsed_all and parsed_all[OID_RPT_RCDB_VER]:
+            self.state["rcdb_version"] = str(parsed_all[OID_RPT_RCDB_VER])
+
+        if OID_RPT_RADIO_ALIAS in parsed_all and parsed_all[OID_RPT_RADIO_ALIAS]:
+            self.state["radio_alias"] = str(parsed_all[OID_RPT_RADIO_ALIAS])
+
+        if OID_RPT_RADIO_ID in parsed_all and isinstance(parsed_all[OID_RPT_RADIO_ID], int):
+            self.state["radio_id"] = parsed_all[OID_RPT_RADIO_ID]
+
+        if OID_SYS_UPTIME in parsed_all and isinstance(parsed_all[OID_SYS_UPTIME], int):
+            self.state["uptime_raw"] = parsed_all[OID_SYS_UPTIME]
+            self.state["uptime_str"] = format_uptime(parsed_all[OID_SYS_UPTIME])
+
+        # ── 4. Alarme & Schwellenwert-Logik ─────────────────────────────────
         warnings = []
+        active_alarms = []
+
+        # Prüfe explizite MIB-Alarm-OIDs
+        if parsed_all.get(OID_ALARM_VOLTAGE) in (1, 2):
+            active_alarms.append({"label": "Spannungs-Alarm (Unter/Überspannung)", "level": "critical"})
+        if parsed_all.get(OID_ALARM_TEMP) in (1, 2):
+            active_alarms.append({"label": "PA-Überhitzungs-Alarm", "level": "critical"})
+        if parsed_all.get(OID_ALARM_FAN) == 1:
+            active_alarms.append({"label": "Lüfter-Störung", "level": "critical"})
+        if parsed_all.get(OID_ALARM_VSWR) == 1:
+            active_alarms.append({"label": "VSWR-Antennenalarm", "level": "critical"})
+
+        # Schwellenwerte
         vswr_w = self.state.get("vswr_wert")
         if vswr_w is not None:
             if vswr_w >= RPT_ALARM_VSWR_HIGH:
@@ -464,6 +611,7 @@ class HyteraSNMPPoller:
                 warnings.append(f"WARNUNG: Überspannung {volt_w:.1f} V")
 
         self.state["warnings"] = warnings
+        self.state["active_alarms"] = active_alarms
 
         telemetry_dict = self.get_telemetry_dict()
         if self.on_telemetry:
@@ -475,11 +623,10 @@ class HyteraSNMPPoller:
         return telemetry_dict
 
     def _send_and_receive(self, packet: bytes) -> Optional[bytes]:
-        """Sendet ein UDP-Paket synchron mit 2.5s Timeout."""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.5)
+            sock.settimeout(2.0)
             sock.sendto(packet, (self.repeater_ip, self.port))
             data, _ = sock.recvfrom(4096)
             return data
@@ -493,13 +640,11 @@ class HyteraSNMPPoller:
                     pass
 
     async def start(self) -> None:
-        """Startet die asynchrone Polling-Schleife."""
         self.running = True
         logger.info(
-            f"Hytera SNMP Poller gestartet: {self.repeater_ip}:{self.port} "
+            f"Hytera SNMP Poller (Full Telemetry) gestartet: {self.repeater_ip}:{self.port} "
             f"(Intervall: {self.interval_s}s)"
         )
-
         while self.running:
             try:
                 await self.poll_once()
@@ -514,5 +659,4 @@ class HyteraSNMPPoller:
                 break
 
     def stop(self) -> None:
-        """Beendet den Poller."""
         self.running = False

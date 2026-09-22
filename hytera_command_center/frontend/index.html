@@ -308,7 +308,9 @@
                   <span style="font-size:12px;font-weight:600;color:var(--text-secondary)">⚡ REPEATER HR1065</span>
                   <span class="chip" id="dash-repeater-chip">Unbekannt</span>
                 </div>
+                <div class="infra-row"><span class="infra-key">Kanal / Zone</span><span class="infra-val" id="dash-rpt-chn">—</span></div>
                 <div class="infra-row"><span class="infra-key">Temperatur</span><span class="infra-val" id="dash-rpt-temp">—</span></div>
+                <div class="infra-row"><span class="infra-key">Stehwelle (VSWR)</span><span class="infra-val" id="dash-rpt-vswr">—</span></div>
                 <div class="infra-row"><span class="infra-key">Spannung</span><span class="infra-val" id="dash-rpt-volt">—</span></div>
                 <div class="infra-row"><span class="infra-key">TX/RX</span><span class="infra-val" id="dash-rpt-txrx">—</span></div>
               </div>
@@ -527,24 +529,46 @@
             <!-- Repeater -->
             <div class="infra-section">
               <div class="infra-section-header">
-                ⚡ Hytera HR1065 Repeater
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span>⚡ Hytera HR1065 DMR-Repeater</span>
+                  <span id="rpt-head-info" style="font-size:11px;color:var(--text-secondary);font-weight:400;"></span>
+                </div>
                 <span class="chip chip-offline" id="infra-repeater-chip">Offline</span>
               </div>
               <div class="infra-section-body">
+                <!-- Status & Kanalzeile -->
+                <div style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:var(--space-3);display:flex;flex-direction:column;gap:4px;">
+                  <div class="infra-row"><span class="infra-key">Kanal / Zone:</span><span class="infra-val" id="rpt-chn-zone" style="font-weight:600;color:var(--text-primary)">—</span></div>
+                  <div class="infra-row"><span class="infra-key">Status / Leistung:</span><span class="infra-val" id="rpt-work-pwr" style="color:var(--color-info)">—</span></div>
+                </div>
+
+                <!-- 4 Haupt-Messwertkarten -->
                 <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
-                  <div class="metric-card"><div class="metric-label">Temperatur</div><div class="metric-value" id="rpt-temp">—</div></div>
-                  <div class="metric-card"><div class="metric-label">Spannung</div><div class="metric-value" id="rpt-volt">—</div></div>
-                  <div class="metric-card"><div class="metric-label">TX-Leistung</div><div class="metric-value" id="rpt-txpwr">—</div></div>
-                  <div class="metric-card"><div class="metric-label">VSWR</div><div class="metric-value" id="rpt-vswr">—</div></div>
+                  <div class="metric-card"><div class="metric-label">PA-Temperatur</div><div class="metric-value" id="rpt-temp">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Betriebsspannung</div><div class="metric-value" id="rpt-volt">—</div></div>
+                  <div class="metric-card"><div class="metric-label">TX-Leistung (Fwd/Ref)</div><div class="metric-value" id="rpt-txpwr">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Stehwellenverhältnis (VSWR)</div><div class="metric-value" id="rpt-vswr">—</div></div>
                 </div>
-                <div id="rpt-details-list"></div>
-                <div class="metric-grid cols-2" style="margin-top:var(--space-3);">
-                  <div class="metric-card"><div class="metric-label">TX-Freq</div><div class="metric-value info" id="rpt-txfreq" style="font-size:14px">—</div></div>
-                  <div class="metric-card"><div class="metric-label">RX-Freq</div><div class="metric-value info" id="rpt-rxfreq" style="font-size:14px">—</div></div>
-                  <div class="metric-card"><div class="metric-label">RSSI TS1</div><div class="metric-value" id="rpt-rssi1">—</div></div>
-                  <div class="metric-card"><div class="metric-label">RSSI TS2</div><div class="metric-value" id="rpt-rssi2">—</div></div>
+
+                <!-- Frequenzen & Signalpegel -->
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">TX-Sendefrequenz</div><div class="metric-value info" id="rpt-txfreq" style="font-size:14px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RX-Empfangsfrequenz</div><div class="metric-value info" id="rpt-rxfreq" style="font-size:14px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Signalstärke Slot 1</div><div class="metric-value" id="rpt-rssi1">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Signalstärke Slot 2</div><div class="metric-value" id="rpt-rssi2">—</div></div>
                 </div>
-                <div id="rpt-alarms" style="margin-top:var(--space-3);display:flex;flex-direction:column;gap:4px;"></div>
+
+                <!-- Detail-Tabelle Identifikation & System -->
+                <div style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:var(--space-3);display:flex;flex-direction:column;gap:6px;">
+                  <div class="infra-row"><span class="infra-key">Modell / Seriennr.:</span><span class="infra-val" id="rpt-model-sn">—</span></div>
+                  <div class="infra-row"><span class="infra-key">Firmware / RCDB:</span><span class="infra-val" id="rpt-fw-rcdb">—</span></div>
+                  <div class="infra-row"><span class="infra-key">Lüfterdrehzahl:</span><span class="infra-val" id="rpt-fanspeed">—</span></div>
+                  <div class="infra-row"><span class="infra-key">Stromversorgung:</span><span class="infra-val" id="rpt-powersource">—</span></div>
+                  <div class="infra-row"><span class="infra-key">Betriebszeit (Uptime):</span><span class="infra-val" id="rpt-uptime">—</span></div>
+                </div>
+
+                <!-- Alarme & Schutzschaltungen -->
+                <div id="rpt-alarms" style="display:flex;flex-direction:column;gap:4px;"></div>
               </div>
             </div>
 

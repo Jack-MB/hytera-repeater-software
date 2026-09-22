@@ -553,44 +553,104 @@ function onRepeaterUpdate(msg) {
   STATE.hw.repeater = s;
 
   const isOnline  = s.online === true;
-  const hasAlarm  = (s.alarm_count || 0) > 0;
+  const hasAlarm  = (s.alarm_count || 0) > 0 || ((s.active_alarms || []).length > 0);
 
   setBadge("badge-repeater", hasAlarm ? "alarm" : (isOnline ? "online" : "offline"));
   setChip("dash-repeater-chip", isOnline, hasAlarm);
   setChip("infra-repeater-chip", isOnline, hasAlarm);
 
-  // Dashboard Quick-View
-  setText("dash-rpt-temp",  s.temp_wert  != null ? `${s.temp_wert.toFixed(1)} \u00b0C`  : "\u2014");
-  setText("dash-rpt-volt",  s.volt_wert  != null ? `${s.volt_wert.toFixed(1)} V`   : "\u2014");
-  setText("dash-rpt-txrx",
-    s.work_state != null ? (s.work_state === 1 ? "TX (Senden)" : "RX (Empfang)") : "\u2014"
-  );
+  // Repeater Header Info (Rufname / Modell / DMR-ID)
+  const aliasParts = [];
+  if (s.radio_alias && s.radio_alias !== "—") aliasParts.push(s.radio_alias);
+  if (s.radio_id) aliasParts.push(`DMR-ID: ${s.radio_id}`);
+  setText("rpt-head-info", aliasParts.length > 0 ? aliasParts.join(" | ") : "");
 
-  // Infrastruktur-Tab
-  setText("rpt-temp",   s.temp_wert   != null ? `${s.temp_wert.toFixed(1)} \u00b0C`   : "\u2014");
-  setText("rpt-volt",   s.volt_wert   != null ? `${s.volt_wert.toFixed(1)} V`    : "\u2014");
-  setText("rpt-txpwr",  s.fw_pwr_watt != null ? `${s.fw_pwr_watt.toFixed(1)} W`  : "\u2014");
-  setText("rpt-vswr",   s.vswr_wert   != null ? s.vswr_wert.toFixed(2)           : "\u2014");
-  setText("rpt-txfreq", s.tx_freq_mhz != null ? `${s.tx_freq_mhz} MHz`           : "\u2014");
-  setText("rpt-rxfreq", s.rx_freq_mhz != null ? `${s.rx_freq_mhz} MHz`           : "\u2014");
-  setText("rpt-rssi1",  s.rssi_slot1  != null ? `${s.rssi_slot1} dB`             : "\u2014");
-  setText("rpt-rssi2",  s.rssi_slot2  != null ? `${s.rssi_slot2} dB`             : "\u2014");
+  // Work State String
+  const wsText = s.work_state_str || (s.work_state === 1 ? "TX (Senden)" : (s.work_state === 0 ? "Standby" : "—"));
+
+  // Dashboard Quick-View
+  const dashChn = (s.channel_name && s.channel_name !== "—") ? s.channel_name : (s.channel_num ? `Kanal ${s.channel_num}` : "—");
+  setText("dash-rpt-chn",   dashChn);
+  setText("dash-rpt-temp",  s.temp_wert  != null ? `${s.temp_wert.toFixed(1)} °C`  : "—");
+  setText("dash-rpt-vswr",  s.vswr_wert  != null ? `${s.vswr_wert.toFixed(2)} : 1` : "—");
+  setText("dash-rpt-volt",  s.volt_wert  != null ? `${s.volt_wert.toFixed(1)} V`   : "—");
+  setText("dash-rpt-txrx",  wsText);
+
+  // Infrastruktur-Tab: Status- & Kanalzeile
+  const chnName = (s.channel_name && s.channel_name !== "—") ? s.channel_name : (s.channel_num ? `Kanal ${s.channel_num}` : "Standard-Kanal");
+  const zoneName = (s.zone_alias && s.zone_alias !== "—") ? ` (${s.zone_alias})` : "";
+  setText("rpt-chn-zone", `${chnName}${zoneName}`);
+
+  const chnType = s.channel_type || "Digital (DMR)";
+  const txLvl = s.tx_power_level ? ` | ${s.tx_power_level}` : "";
+  setText("rpt-work-pwr", `${wsText} | ${chnType}${txLvl}`);
+
+  // Infrastruktur-Tab: 4 Haupt-Messwerte
+  setText("rpt-temp", s.temp_wert != null ? `${s.temp_wert.toFixed(1)} °C` : "—");
+  setText("rpt-volt", s.volt_wert != null ? `${s.volt_wert.toFixed(1)} V`  : "—");
+  
+  const pwrDisplay = (s.fw_pwr_watt != null)
+    ? `${s.fw_pwr_watt.toFixed(1)} W` + (s.ref_pwr_watt != null ? ` (Ref: ${s.ref_pwr_watt.toFixed(1)} W)` : "")
+    : "—";
+  setText("rpt-txpwr", pwrDisplay);
+
+  // VSWR mit Ampelfarbe
+  const vswrEl = document.getElementById("rpt-vswr");
+  if (vswrEl) {
+    if (s.vswr_wert != null) {
+      vswrEl.textContent = `${s.vswr_wert.toFixed(2)} : 1`;
+      vswrEl.className = "metric-value " + (s.vswr_wert >= 2.8 ? "critical" : (s.vswr_wert >= 2.0 ? "warning" : "good"));
+    } else {
+      vswrEl.textContent = "—";
+      vswrEl.className = "metric-value";
+    }
+  }
+
+  // Frequenzen & Signalpegel
+  setText("rpt-txfreq", s.tx_freq_mhz != null ? `${s.tx_freq_mhz.toFixed(4)} MHz` : "—");
+  setText("rpt-rxfreq", s.rx_freq_mhz != null ? `${s.rx_freq_mhz.toFixed(4)} MHz` : "—");
+  setText("rpt-rssi1",  s.rssi_slot1  != null ? `${s.rssi_slot1} dBm`            : "—");
+  setText("rpt-rssi2",  s.rssi_slot2  != null ? `${s.rssi_slot2} dBm`            : "—");
+
+  // Geräte-Details
+  const modelText = s.model_name || "Hytera HR1065";
+  const snText = (s.serial_number && s.serial_number !== "—") ? ` (SN: ${s.serial_number})` : "";
+  setText("rpt-model-sn", `${modelText}${snText}`);
+
+  const fwText = (s.firmware_version && s.firmware_version !== "—") ? s.firmware_version : "—";
+  const rcdbText = (s.rcdb_version && s.rcdb_version !== "—") ? ` | RCDB: ${s.rcdb_version}` : "";
+  setText("rpt-fw-rcdb", `${fwText}${rcdbText}`);
+
+  setText("rpt-fanspeed", s.fan_speed != null ? `${s.fan_speed} RPM` : "Temperaturgeregelt");
+
+  const pwrSrc = s.power_source || "DC Netzteil";
+  const battV = s.batt_volt_wert != null ? ` (${s.batt_volt_wert.toFixed(1)} V)` : "";
+  setText("rpt-powersource", `${pwrSrc}${battV}`);
+
+  setText("rpt-uptime", s.uptime_str || "—");
+
   // Trap-Counter
   setText("rpt-trap-count",  s.trap_count  != null ? String(s.trap_count)  : "0");
   setText("rpt-alarm-count", s.alarm_count != null ? String(s.alarm_count) : "0");
 
-  // Alarm-Flags aus SNMP-OID-Alarmen
+  // Alarm-Flags & Warnungen
   const alarmsEl = document.getElementById("rpt-alarms");
   if (alarmsEl) {
     const active = s.active_alarms || [];
-    if (active.length > 0) {
-      alarmsEl.innerHTML = active.map(a =>
-        `<div class="chip chip-emergency">&#9888; ${a.oid_label || a.oid_key}: ${a.value || ""}</div>`
-      ).join("");
+    const warns = s.warnings || [];
+    if (active.length > 0 || warns.length > 0) {
+      let html = "";
+      for (const a of active) {
+        html += `<div class="chip chip-emergency">&#9888; ${a.label || a.oid_label || a.oid_key || "Alarm"}</div>`;
+      }
+      for (const w of warns) {
+        html += `<div class="chip chip-warning">&#9889; ${w}</div>`;
+      }
+      alarmsEl.innerHTML = html;
     } else if (isOnline) {
-      alarmsEl.innerHTML = '<div class="chip chip-online">\u2713 Alle Systeme normal</div>';
+      alarmsEl.innerHTML = '<div class="chip chip-online">\u2713 Alle Systeme & HF-Parameter im Normbereich</div>';
     } else {
-      alarmsEl.innerHTML = '<div class="chip chip-offline">Keine Verbindung</div>';
+      alarmsEl.innerHTML = '<div class="chip chip-offline">Keine Verbindung zum Repeater</div>';
     }
   }
 }

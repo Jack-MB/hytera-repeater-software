@@ -1290,8 +1290,42 @@ class TestSNMPPollerAndMIB:
             assert "repeater" in data
             rpt = data["repeater"]
             # Alle Telemetrie-Felder müssen im Dict vorhanden sein
-            for field_key in ("online", "temp_wert", "volt_wert", "fw_pwr_watt", "vswr_wert", "rssi_slot1", "warnings"):
+            for field_key in (
+                "online", "temp_wert", "volt_wert", "fw_pwr_watt", "ref_pwr_watt",
+                "vswr_wert", "rssi_slot1", "rssi_slot2", "channel_name",
+                "tx_freq_mhz", "rx_freq_mhz", "model_name", "serial_number",
+                "firmware_version", "uptime_str", "warnings", "active_alarms"
+            ):
                 assert field_key in rpt
+
+    def test_full_repeater_identity_and_channel_parameters(self):
+        from backend.hardware.snmp_poller import HyteraSNMPPoller
+        poller = HyteraSNMPPoller()
+        st = poller.get_telemetry_dict()
+        assert "channel_name" in st
+        assert "zone_alias" in st
+        assert "tx_freq_mhz" in st
+        assert "rx_freq_mhz" in st
+        assert "tx_power_level" in st
+        assert "work_state_str" in st
+        assert "model_name" in st
+        assert "uptime_str" in st
+
+    def test_format_uptime_and_decode_string_value(self):
+        from backend.hardware.snmp_poller import format_uptime, decode_string_value
+        # 1. Uptime: 9006100 TimeTicks = 90061s = 1d 01h 01m
+        up_str = format_uptime(9006100)
+        assert "1d" in up_str
+        assert "01h" in up_str
+
+        # 2. Decode UTF-16LE
+        raw16 = "HR1065".encode("utf-16-le")
+        assert decode_string_value(raw16) == "HR1065"
+
+        # 3. Decode UTF-8
+        raw8 = "Florian 1/11".encode("utf-8")
+        assert decode_string_value(raw8) == "Florian 1/11"
+
 
 
 

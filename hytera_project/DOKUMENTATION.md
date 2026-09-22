@@ -591,8 +591,15 @@ Das System wurde in den Ordner `hytera_command_center/` als eigenständige, hoch
 - **Leitstellen-Replay:** Sofortige Funkspruch-Wiedergabe im Browser (`▶ Anhören`), Floating Dispatcher Player Bar (`↺ 5s`, `0.8x-1.2x`, `+8 dB` Sprachverstärkung, Hotkey `F8`/`Alt+R`).
 - **WebSocket-Architektur:** Vollduplex-Echtzeitkommunikation mit parallelem Broadcast und Client-Fehlerisolation.
 - **Offline-Fähigkeit:** Integrierte Karten-Tiles, SQLite im WAL-Modus mit 5000ms Busy-Timeout.
-- **Automatisierte Tests:** 74/74 Unittests in `backend/tests/test_all.py`.
+- **Vollständige LibreNMS MIB-Telemetrie:** Reiner Python BER/DER ASN.1 SNMP-Poller (Multi-Batch ohne MTU-Fragmentierung), Erfassung sämtlicher Repeater-Parameter (`HYTERA-REPEATER-MIB` & MIB-2 `sysUpTime`):
+  - **HF & Leistung:** TX-Sendefrequenz & RX-Empfangsfrequenz (MHz), Vorwärtsleistung (W), Reflektierte Leistung (W), VSWR-Stehwellenverhältnis mit dynamischer Ampel-Bewertung.
+  - **Betrieb & Kanal:** Aktiver Kanalname, Zonenname, Sendeleistungsstufe (High/Low), Repeater-Alias, Repeater DMR-ID.
+  - **Hardware & Umgebung:** PA-Temperatur (°C), Betriebsspannung (V), Lüfterdrehzahl (RPM), Stromquelle (DC/AC/Battery), System-Uptime.
+  - **Identifikation & Firmware:** Gerätemodell, Seriennummer, Firmware-Version, RCDB-Version (mit automatischer UTF-16LE/UTF-8 Null-Byte Bereinigung).
+  - **Echtzeit-Schutzalarme:** PA-Übertemperatur, VSWR-Fehler, Über-/Unterspannung, Lüfterausfall, TX/RX-PLL-Fehler, Überstrom, Batterie schwach.
+- **Automatisierte Tests:** 83/83 Unittests in `backend/tests/test_all.py`.
 
 ---
 
-*Dokumentation aktualisiert: 2026-09-17 | Hytera HR1065 Command Center*
+*Dokumentation aktualisiert: 2026-09-22 | Hytera HR1065 Command Center*
+
