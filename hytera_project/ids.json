@@ -1,0 +1,50 @@
+{
+  "1001": {
+    "name": "Jan2 (ELW 1)",
+    "geraet": "HR1065 Fixed/ELW"
+  },
+  "1002": {
+    "name": "Mitarbeiter 2 (RT81 #2)",
+    "geraet": "RT81 Portable (Kein GPS)"
+  },
+  "1003": {
+    "name": "Mario (Angriffstrupp)",
+    "geraet": "HP785 MD655"
+  },
+  "1005": {
+    "name": "Andreas",
+    "geraet": ""
+  },
+  "1008": {
+    "name": "Willi",
+    "geraet": ""
+  },
+  "1010": {
+    "name": "Jürgen (Wassertrupp)",
+    "geraet": "RT81 Portable (Kein GPS)"
+  },
+  "1012": {
+    "name": "Ibo",
+    "geraet": ""
+  },
+  "1016": {
+    "name": "Jan1",
+    "geraet": ""
+  },
+  "1027": {
+    "name": "Judi",
+    "geraet": ""
+  },
+  "1057": {
+    "name": "Sergey",
+    "geraet": ""
+  },
+  "1059": {
+    "name": "Tasnim (Sanitäter MTW)",
+    "geraet": "HM785 Mobile"
+  },
+  "3001": {
+    "name": "Trupp Wasserförderung",
+    "geraet": "Hytera HP785"
+  }
+}

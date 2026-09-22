@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Hytera Command Center – ELW Führungsunterstützungssystem für DMR-Funk, GPS-Tracking und Infrastruktur-Monitoring">
+  <title>Hytera Command Center</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+  <link rel="manifest" href="/manifest.json">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <style>
+    /* Karten-spezifische Stile */
+    #map-container { position: relative; flex: 1; overflow: hidden; }
+    #map { width: 100%; height: 100%; background: #1a1d24; }
+    .leaflet-container { background: #1a1d24; }
+
+    /* Karten-Overlay-Panels */
+    .map-overlay {
+      position: absolute;
+      z-index: 1000;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    .map-overlay-tr { top: 12px; right: 12px; }
+    .map-overlay-tl { top: 12px; left: 12px; }
+    .map-overlay-bl { bottom: 40px; left: 12px; max-width: 320px; }
+
+    /* Karten-Toolbar */
+    .map-toolbar {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      display: flex;
+      gap: 6px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      padding: 6px;
+    }
+
+    /* Infrastruktur-Dashboard */
+    .infra-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: var(--space-3);
+      padding: var(--space-4);
+    }
+    .infra-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .infra-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: var(--font-size-sm);
+      font-weight: 600;
+    }
+    .infra-section-body { padding: var(--space-3); }
+    .infra-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: var(--font-size-sm);
+    }
+    .infra-row:last-child { border-bottom: none; }
+    .infra-key { color: var(--text-secondary); }
+    .infra-val { color: var(--text-primary); font-weight: 500; font-family: var(--font-mono); font-size: var(--font-size-xs); }
+
+    /* Diagnose-Panel */
+    .packet-list { display: flex; flex-direction: column; gap: 2px; }
+    .packet-entry {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: 4px var(--space-3);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: var(--font-size-xs);
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      cursor: pointer;
+      transition: background var(--transition);
+    }
+    .packet-entry:hover { background: var(--bg-hover); }
+    .packet-port { color: var(--accent); font-weight: 600; min-width: 50px; }
+    .packet-service { color: var(--text-secondary); min-width: 80px; }
+    .packet-opcode { color: var(--yellow); min-width: 70px; }
+    .packet-hex { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Tactical / Mission Panel */
+    .mission-header-panel {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--space-3);
+      padding: var(--space-4);
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    /* SMS Chat */
+    .sms-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      padding: var(--space-3);
+    }
+    .sms-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: var(--space-3);
+      border-radius: var(--radius-lg);
+      max-width: 80%;
+    }
+    .sms-item.incoming { background: var(--bg-card); border: 1px solid var(--border-subtle); align-self: flex-start; }
+    .sms-item.outgoing { background: var(--accent-glow); border: 1px solid rgba(47,129,247,0.3); align-self: flex-end; }
+    .sms-sender { font-size: var(--font-size-xs); font-weight: 600; color: var(--accent); }
+    .sms-text { font-size: var(--font-size-sm); color: var(--text-primary); }
+    .sms-time { font-size: var(--font-size-xs); color: var(--text-muted); }
+
+    /* Leaflet Dark Mode Override */
+    .leaflet-tile { filter: brightness(0.7) contrast(1.1) saturate(0.8); }
+    .leaflet-popup-content-wrapper {
+      background: var(--bg-panel);
+      color: var(--text-primary);
+      border: 1px solid var(--border-normal);
+      border-radius: var(--radius-lg);
+    }
+    .leaflet-popup-tip { background: var(--bg-panel); }
+    .leaflet-control-zoom a { background: var(--bg-panel); color: var(--text-primary); border-color: var(--border-normal); }
+    .leaflet-control-zoom a:hover { background: var(--bg-hover); }
+    .leaflet-control-attribution { background: rgba(22,27,34,0.85); color: var(--text-muted); }
+  </style>
+</head>
+<body>
+<!-- ══════════════════════════════════════════════════
+     App Shell
+════════════════════════════════════════════════════ -->
+<div id="app">
+
+  <!-- ── Topbar ─────────────────────────────────── -->
+  <header id="topbar">
+    <div class="topbar-logo">
+      <div class="logo-icon">📡</div>
+      <span>Command Center</span>
+    </div>
+
+    <div class="topbar-mission">
+      <span id="topbar-mission-title" class="topbar-mission-title">—</span>
+      <span id="topbar-mission-sub" class="topbar-mission-sub"></span>
+    </div>
+
+    <div id="ptt-indicator-container" style="display:none">
+      <div class="ptt-indicator">
+        <div class="ptt-dot"></div>
+        <span id="ptt-indicator-text">PTT aktiv</span>
+      </div>
+    </div>
+
+    <button id="btn-replay-latest-call" class="btn btn-sm btn-secondary" onclick="playLatestAudio()" title="Letzten Funkspruch sofort anhören (Shortcut: F8 oder Alt+R)" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;background:rgba(47,129,247,0.15);border-color:rgba(47,129,247,0.4);color:var(--text-primary);cursor:pointer;border-radius:var(--radius-md);">
+      <span id="btn-replay-label">↺ Letzter Funkspruch</span>
+    </button>
+
+    <div class="topbar-indicators">
+      <div class="status-badge" id="badge-repeater" title="Repeater HR1065">
+        <div class="dot"></div>
+        <span>Repeater</span>
+      </div>
+      <div class="status-badge" id="badge-ups" title="BlueWalker USV">
+        <div class="dot"></div>
+        <span id="badge-ups-label">USV</span>
+      </div>
+      <div class="status-badge" id="badge-zte" title="ZTE MF281 LTE">
+        <div class="dot"></div>
+        <span id="badge-zte-label">LTE</span>
+      </div>
+      <div class="status-badge" id="badge-ws" title="WebSocket-Verbindung">
+        <div class="dot"></div>
+        <span>System</span>
+      </div>
+      <div class="topbar-clock" id="topbar-clock">00:00:00</div>
+    </div>
+  </header>
+
+  <!-- ── Main Layout ────────────────────────────── -->
+  <div id="main-layout">
+
+    <!-- ── Sidebar ───────────────────────────────── -->
+    <nav id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Navigation</div>
+        <div class="nav-item active" data-tab="dashboard" id="nav-dashboard">
+          <span class="nav-icon">⊞</span> Dashboard
+        </div>
+        <div class="nav-item" data-tab="map" id="nav-map">
+          <span class="nav-icon">🗺</span> Lagekarte
+        </div>
+        <div class="nav-item" data-tab="radios" id="nav-radios">
+          <span class="nav-icon">📻</span> Funkgeräte
+          <span class="nav-badge" id="badge-emergency" style="display:none">!</span>
+        </div>
+        <div class="nav-item" data-tab="sms" id="nav-sms">
+          <span class="nav-icon">💬</span> Nachrichten
+          <span class="nav-badge" id="badge-sms-count" style="display:none">0</span>
+        </div>
+        <div class="nav-item" data-tab="timeline" id="nav-timeline">
+          <span class="nav-icon">📋</span> Protokoll
+        </div>
+        <div class="nav-item" data-tab="tactical" id="nav-tactical">
+          <span class="nav-icon">🎯</span> Einsatzleitung
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Infrastruktur</div>
+        <div class="nav-item" data-tab="infrastructure" id="nav-infrastructure">
+          <span class="nav-icon">🔧</span> Hardware-Status
+        </div>
+        <div class="nav-item" data-tab="diagnostics" id="nav-diagnostics">
+          <span class="nav-icon">🔬</span> Diagnose
+        </div>
+        <div class="nav-item" data-tab="settings" id="nav-settings">
+          <span class="nav-icon">⚙</span> Einstellungen
+        </div>
+      </div>
+
+      <!-- Einheiten-Schnellzugriff -->
+      <div class="sidebar-section" style="flex:1; overflow-y:auto;">
+        <div class="sidebar-section-label">Einheiten</div>
+        <div class="unit-list" id="sidebar-unit-list">
+          <div class="empty-state" style="padding: 20px;">
+            <span style="font-size:24px; opacity:0.3">📻</span>
+            <span style="font-size:11px; color:var(--text-muted)">Keine Einheiten</span>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- ── Content Area ───────────────────────────── -->
+    <main id="content">
+
+      <!-- ════ TAB: DASHBOARD ════ -->
+      <div id="tab-dashboard" class="tab-panel active" style="overflow-y:auto; padding: var(--space-4); gap: var(--space-4);">
+        <!-- KPI-Row -->
+        <div class="metric-grid cols-4" style="margin-bottom: var(--space-4);">
+          <div class="metric-card">
+            <div class="metric-label">Online-Einheiten</div>
+            <div class="metric-value info" id="kpi-online">0</div>
+            <div class="metric-sub" id="kpi-total-sub">von 0 gesamt</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Aktive Notrufe</div>
+            <div class="metric-value" id="kpi-emergency" style="color:var(--text-muted)">0</div>
+            <div class="metric-sub">Sofort quittieren</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Funk-Aktivität</div>
+            <div class="metric-value info" id="kpi-calls">0</div>
+            <div class="metric-sub">PTT-Ereignisse heute</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Systemmeldungen</div>
+            <div class="metric-value" id="kpi-alarms" style="color:var(--text-muted)">0</div>
+            <div class="metric-sub">SNMP-Alarme</div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);">
+          <!-- Letzte Anrufe -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🎙️ Letzte Funkverbindungen</div>
+              <button class="btn btn-sm" onclick="switchTab('radios')">Alle →</button>
+            </div>
+            <div style="overflow-y:auto; max-height: 280px;">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Zeit</th><th>Einheit</th><th>Typ</th><th>Dauer</th><th>RSSI</th><th style="text-align:center">Audio</th>
+                </tr></thead>
+                <tbody id="dashboard-calls-table">
+                  <tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:20px">Keine Daten</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Hardware-Kurzstatus -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">🔧 Infrastruktur</div>
+              <button class="btn btn-sm" onclick="switchTab('infrastructure')">Details →</button>
+            </div>
+            <div class="card-body" style="display:flex; flex-direction:column; gap: var(--space-3);">
+              <!-- Repeater -->
+              <div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:12px;font-weight:600;color:var(--text-secondary)">⚡ REPEATER HR1065</span>
+                  <span class="chip" id="dash-repeater-chip">Unbekannt</span>
+                </div>
+                <div class="infra-row"><span class="infra-key">Temperatur</span><span class="infra-val" id="dash-rpt-temp">—</span></div>
+                <div class="infra-row"><span class="infra-key">Spannung</span><span class="infra-val" id="dash-rpt-volt">—</span></div>
+                <div class="infra-row"><span class="infra-key">TX/RX</span><span class="infra-val" id="dash-rpt-txrx">—</span></div>
+              </div>
+              <div class="divider"></div>
+              <!-- USV -->
+              <div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:12px;font-weight:600;color:var(--text-secondary)">🔋 USV POWERWALKER</span>
+                  <span class="chip" id="dash-ups-chip">Unbekannt</span>
+                </div>
+                <div class="infra-row"><span class="infra-key">Batterie</span>
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <div class="progress-bar" style="width:80px"><div class="progress-fill" id="dash-ups-batt-bar" style="width:0%"></div></div>
+                    <span class="infra-val" id="dash-ups-batt-pct">—</span>
+                  </div>
+                </div>
+                <div class="infra-row"><span class="infra-key">Restlaufzeit</span><span class="infra-val" id="dash-ups-runtime">—</span></div>
+                <div class="infra-row"><span class="infra-key">Last</span><span class="infra-val" id="dash-ups-load">—</span></div>
+              </div>
+              <div class="divider"></div>
+              <!-- LTE -->
+              <div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:12px;font-weight:600;color:var(--text-secondary)">📶 ZTE MF281 LTE</span>
+                  <span class="chip" id="dash-zte-chip">Unbekannt</span>
+                </div>
+                <div class="infra-row"><span class="infra-key">Netztyp</span><span class="infra-val" id="dash-zte-type">—</span></div>
+                <div class="infra-row"><span class="infra-key">RSRP</span><span class="infra-val" id="dash-zte-rsrp">—</span></div>
+                <div class="infra-row"><span class="infra-key">WAN-IP</span><span class="infra-val" id="dash-zte-ip">—</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SMS-Vorschau -->
+        <div class="card" style="margin-top: var(--space-4);">
+          <div class="card-header">
+            <div class="card-title">💬 Letzte Nachrichten</div>
+            <button class="btn btn-sm" onclick="switchTab('sms')">Alle →</button>
+          </div>
+          <div style="overflow-y:auto; max-height:160px;">
+            <table class="data-table">
+              <thead><tr><th>Zeit</th><th>Von</th><th>Nachricht</th></tr></thead>
+              <tbody id="dashboard-sms-table">
+                <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:20px">Keine Nachrichten</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: KARTE ════ -->
+      <div id="tab-map" class="tab-panel" style="position:relative;">
+        <div id="map-container">
+          <div id="map"></div>
+
+          <!-- Karten-Toolbar -->
+          <div class="map-toolbar">
+            <button class="btn btn-sm" id="btn-map-center" title="Auf alle Einheiten zentrieren">⊙ Einheiten</button>
+            <button class="btn btn-sm" id="btn-toggle-breadcrumbs" title="Pfade ein/ausblenden">〰 Pfade</button>
+            <button class="btn btn-sm" id="btn-toggle-labels" title="Funkrufnamen und Marker-Beschriftungen ein/ausblenden">🏷 Labels</button>
+            <button class="btn btn-sm" id="btn-toggle-rssi" title="RSSI-Heatmap">📶 RSSI</button>
+            <button class="btn btn-sm btn-danger" id="btn-add-marker" title="Marker setzen">＋ Marker</button>
+            <button class="btn btn-sm" id="btn-add-geofence" title="Geofence zeichnen">⬡ Zone</button>
+            <select class="form-select" id="map-floor-select" style="padding:4px 8px;font-size:12px;width:auto;">
+              <option value="">Alle Ebenen</option>
+              <option value="UG">UG</option>
+              <option value="EG">EG</option>
+              <option value="OG1">1. OG</option>
+              <option value="OG2">2. OG</option>
+              <option value="Dach">Dach</option>
+            </select>
+          </div>
+
+          <!-- Karten-Info-Box -->
+          <div class="map-overlay map-overlay-tr" style="padding: var(--space-3); min-width:200px;">
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AKTIVE EINHEITEN</div>
+            <div id="map-units-summary" style="font-size:12px; color:var(--text-secondary)">0 online</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: FUNKGERÄTE ════ -->
+      <div id="tab-radios" class="tab-panel" style="overflow-y:auto;">
+        <div style="padding: var(--space-4); display:flex; flex-direction:column; gap: var(--space-4);">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <h3>Funkgeräte-Verwaltung</h3>
+            <div style="display:flex;gap:var(--space-2);">
+              <button class="btn btn-sm" id="btn-export-ids">⬇ ids.json</button>
+              <button class="btn btn-primary btn-sm" id="btn-add-radio">＋ Gerät</button>
+            </div>
+          </div>
+
+          <!-- Notruf-Panel -->
+          <div id="emergency-panel" style="display:none" class="card" style="border-color:var(--red-border);">
+            <div class="card-header" style="background:var(--red-bg);border-color:var(--red-border)">
+              <div class="card-title" style="color:var(--red)">🚨 AKTIVER NOTRUF</div>
+            </div>
+            <div id="emergency-list" class="card-body"></div>
+          </div>
+
+          <table class="data-table">
+            <thead><tr>
+              <th>ID</th><th>Alias</th><th>Gerät</th><th>Status</th>
+              <th>Letztes GPS</th><th>RSSI</th><th>Ebene</th><th>Aktionen</th>
+            </tr></thead>
+            <tbody id="radios-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ════ TAB: SMS ════ -->
+      <div id="tab-sms" class="tab-panel" style="flex-direction:row;">
+        <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
+          <div style="padding:var(--space-3);border-bottom:1px solid var(--border-subtle);display:flex;gap:var(--space-2);">
+            <input type="number" id="sms-target-id" class="form-input" placeholder="Ziel-ID" style="width:120px">
+            <input type="text"   id="sms-text-input" class="form-input" placeholder="Nachricht eingeben..." style="flex:1">
+            <button class="btn btn-primary" id="btn-send-sms">Senden ➤</button>
+          </div>
+          <div id="sms-list-container" class="scroll-area">
+            <div class="sms-list" id="sms-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: PROTOKOLL ════ -->
+      <div id="tab-timeline" class="tab-panel" style="overflow-y:auto; padding: var(--space-4);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-4);">
+          <h3>Einsatzprotokoll</h3>
+          <div style="display:flex;gap:var(--space-2);">
+            <button class="btn btn-secondary btn-sm" id="btn-filter-ptt-audio" title="Nur Funksprüche mit Aufnahme anzeigen">🎙️ Nur Funksprüche</button>
+            <input type="datetime-local" id="timeline-from" class="form-input" style="width:200px">
+            <input type="datetime-local" id="timeline-to" class="form-input" style="width:200px">
+            <button class="btn btn-primary btn-sm" id="btn-load-timeline">Laden</button>
+          </div>
+        </div>
+        <div id="timeline-list"></div>
+      </div>
+
+      <!-- ════ TAB: EINSATZLEITUNG ════ -->
+      <div id="tab-tactical" class="tab-panel" style="overflow-y:auto;">
+        <div class="mission-header-panel">
+          <div class="form-group">
+            <label class="form-label">Einsatztitel</label>
+            <input type="text" id="mission-title" class="form-input" placeholder="z.B. Brand Musterstraße 5">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Einsatzcode</label>
+            <input type="text" id="mission-code" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Status</label>
+            <select id="mission-status" class="form-select">
+              <option value="preparation">Vorbereitung</option>
+              <option value="active">Aktiv</option>
+              <option value="standby">Bereitschaft</option>
+              <option value="concluded">Beendet</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Einsatzleiter</label>
+            <input type="text" id="mission-leader" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Einsatzort</label>
+            <input type="text" id="mission-location" class="form-input">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Kanal</label>
+            <input type="text" id="mission-channel" class="form-input" value="Kanal 1 / TS1 & TS2">
+          </div>
+        </div>
+        <div style="padding:var(--space-3);display:flex;gap:var(--space-2);">
+          <button class="btn btn-primary" id="btn-save-mission">💾 Speichern</button>
+          <button class="btn" id="btn-new-mission">＋ Neuer Einsatz</button>
+        </div>
+
+        <div style="padding:0 var(--space-4) var(--space-4);display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4);">
+          <!-- Lageplan-Upload -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">🗺 Lagepläne</div>
+              <button class="btn btn-sm btn-primary" id="btn-upload-plan">＋ Hochladen</button>
+            </div>
+            <div style="overflow-y:auto;max-height:250px;"><div id="plans-list"></div></div>
+          </div>
+
+          <!-- Geofences -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">⬡ Gefahrenzonen</div></div>
+            <div style="overflow-y:auto;max-height:250px;"><div id="geofences-list"></div></div>
+          </div>
+        </div>
+
+        <!-- Einsatz-Notizen -->
+        <div style="padding:0 var(--space-4) var(--space-4);">
+          <div class="card">
+            <div class="card-header"><div class="card-title">📝 Einsatznotizen</div></div>
+            <div class="card-body">
+              <textarea id="mission-notes" class="form-textarea" style="min-height:120px;width:100%" placeholder="Notizen, Lagebeschreibung, besondere Maßnahmen..."></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: INFRASTRUKTUR ════ -->
+      <div id="tab-infrastructure" class="tab-panel" style="overflow-y:auto;">
+        <div style="padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-4);">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <h3>Hardware-Status</h3>
+            <button class="btn btn-sm" id="btn-poll-all">🔄 Alle aktualisieren</button>
+          </div>
+
+          <!-- 4-Panel Grid -->
+          <div class="infra-grid">
+
+            <!-- Repeater -->
+            <div class="infra-section">
+              <div class="infra-section-header">
+                ⚡ Hytera HR1065 Repeater
+                <span class="chip chip-offline" id="infra-repeater-chip">Offline</span>
+              </div>
+              <div class="infra-section-body">
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">Temperatur</div><div class="metric-value" id="rpt-temp">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Spannung</div><div class="metric-value" id="rpt-volt">—</div></div>
+                  <div class="metric-card"><div class="metric-label">TX-Leistung</div><div class="metric-value" id="rpt-txpwr">—</div></div>
+                  <div class="metric-card"><div class="metric-label">VSWR</div><div class="metric-value" id="rpt-vswr">—</div></div>
+                </div>
+                <div id="rpt-details-list"></div>
+                <div class="metric-grid cols-2" style="margin-top:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">TX-Freq</div><div class="metric-value info" id="rpt-txfreq" style="font-size:14px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RX-Freq</div><div class="metric-value info" id="rpt-rxfreq" style="font-size:14px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RSSI TS1</div><div class="metric-value" id="rpt-rssi1">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RSSI TS2</div><div class="metric-value" id="rpt-rssi2">—</div></div>
+                </div>
+                <div id="rpt-alarms" style="margin-top:var(--space-3);display:flex;flex-direction:column;gap:4px;"></div>
+              </div>
+            </div>
+
+            <!-- USV -->
+            <div class="infra-section">
+              <div class="infra-section-header">
+                🔋 BlueWalker PowerWalker VFI 2000
+                <span class="chip chip-offline" id="infra-ups-chip">Offline</span>
+              </div>
+              <div class="infra-section-body">
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card">
+                    <div class="metric-label">Batterie</div>
+                    <div class="metric-value" id="ups-batt-pct">—</div>
+                    <div class="progress-bar" style="margin-top:6px"><div class="progress-fill" id="ups-batt-bar" style="width:0%"></div></div>
+                  </div>
+                  <div class="metric-card"><div class="metric-label">Restlaufzeit</div><div class="metric-value good" id="ups-runtime">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Last</div><div class="metric-value" id="ups-load">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Status</div><div class="metric-value" id="ups-status" style="font-size:13px">—</div></div>
+                </div>
+                <div class="metric-grid cols-2">
+                  <div class="metric-card"><div class="metric-label">Eingang V</div><div class="metric-value info" id="ups-in-volt">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Eingang Hz</div><div class="metric-value" id="ups-in-freq">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Ausgang V</div><div class="metric-value good" id="ups-out-volt">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Ausgang W</div><div class="metric-value" id="ups-out-power">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Batt-Spannung</div><div class="metric-value" id="ups-batt-volt">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Innentemp</div><div class="metric-value" id="ups-temp">—</div></div>
+                </div>
+                <button class="btn btn-sm" id="btn-ups-scan" style="margin-top:var(--space-3)">🔬 Register-Scan</button>
+              </div>
+            </div>
+
+            <!-- ZTE -->
+            <div class="infra-section">
+              <div class="infra-section-header">
+                📶 ZTE MF281 (Telekom Speedbox 2)
+                <span class="chip chip-offline" id="infra-zte-chip">Offline</span>
+              </div>
+              <div class="infra-section-body">
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card">
+                    <div class="metric-label">Signal</div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                      <div class="signal-bars" id="zte-signal-bars" data-bars="0">
+                        <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                        <div class="bar"></div><div class="bar"></div>
+                      </div>
+                      <div class="metric-value" id="zte-signal-quality" style="font-size:12px">—</div>
+                    </div>
+                  </div>
+                  <div class="metric-card"><div class="metric-label">Netztyp</div><div class="metric-value info" id="zte-nettype" style="font-size:14px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RSRP</div><div class="metric-value" id="zte-rsrp">—</div></div>
+                  <div class="metric-card"><div class="metric-label">SINR</div><div class="metric-value" id="zte-sinr">—</div></div>
+                  <div class="metric-card"><div class="metric-label">RSRQ</div><div class="metric-value" id="zte-rsrq">—</div></div>
+                  <div class="metric-card"><div class="metric-label">WAN-IP</div><div class="metric-value" id="zte-wan-ip" style="font-size:11px">—</div></div>
+                </div>
+                <div class="metric-grid cols-2">
+                  <div class="metric-card"><div class="metric-label">Download</div><div class="metric-value good" id="zte-dl">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Upload</div><div class="metric-value" id="zte-ul">—</div></div>
+                </div>
+                <div class="infra-row" style="margin-top:var(--space-3)"><span class="infra-key">Cell-ID</span><span class="infra-val" id="zte-cell-id">—</span></div>
+                <div class="infra-row"><span class="infra-key">eNB-ID</span><span class="infra-val" id="zte-enodeb">—</span></div>
+                <div class="infra-row"><span class="infra-key">MCC/MNC</span><span class="infra-val" id="zte-mcc-mnc">—</span></div>
+              </div>
+            </div>
+
+            <!-- Omada ER606 -->
+            <div class="infra-section">
+              <div class="infra-section-header">
+                🔀 TP-Link Omada ER606 (LAN-Router)
+                <span class="chip chip-offline" id="infra-omada-chip">Offline</span>
+              </div>
+              <div class="infra-section-body">
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value info" id="omada-uptime" style="font-size:13px">—</div></div>
+                  <div class="metric-card"><div class="metric-label">WAN</div><div class="metric-value" id="omada-wan-status">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Download</div><div class="metric-value good" id="omada-dl">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Upload</div><div class="metric-value" id="omada-ul">—</div></div>
+                </div>
+                <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">PORT-STATUS</div>
+                <div id="omada-ports-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SNMP-Alarm-Verlauf -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">🔔 SNMP-Alarm-Verlauf (Repeater)</div></div>
+            <div style="overflow-y:auto;max-height:200px;">
+              <table class="data-table">
+                <thead><tr><th>Zeit</th><th>Alarm</th><th>Wert</th><th>Level</th></tr></thead>
+                <tbody id="snmp-events-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: DIAGNOSE ════ -->
+      <div id="tab-diagnostics" class="tab-panel" style="overflow-y:auto; padding: var(--space-4);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-4);">
+          <h3>Protokoll-Diagnose</h3>
+          <div style="display:flex;gap:var(--space-2);">
+            <button class="btn btn-sm" id="btn-toggle-dump">▶ Dump starten</button>
+            <button class="btn btn-sm btn-danger" id="btn-clear-dump">✕ Löschen</button>
+          </div>
+        </div>
+
+        <!-- Port-Statistiken -->
+        <div class="card" style="margin-bottom:var(--space-4);">
+          <div class="card-header"><div class="card-title">📊 UDP-Port-Statistiken</div></div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead><tr><th>Port</th><th>Dienst</th><th>Pakete</th><th>Pkt/s</th><th>Status</th></tr></thead>
+              <tbody id="port-stats-table"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Paket-Liste -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">📦 Paket-Buffer</div>
+            <span id="dump-count" style="font-size:11px;color:var(--text-muted)">0 Pakete</span>
+          </div>
+          <div id="packet-list-container" class="packet-list" style="max-height:400px;overflow-y:auto;padding:var(--space-2);"></div>
+        </div>
+      </div>
+
+      <!-- ════ TAB: EINSTELLUNGEN ════ -->
+      <div id="tab-settings" class="tab-panel" style="overflow-y:auto; padding: var(--space-4);">
+        <div style="display:flex;flex-direction:column;gap:var(--space-4);max-width:700px;">
+          <h3>Systemeinstellungen</h3>
+
+          <!-- Hardware -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">🔧 Hardware-Konfiguration</div></div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Repeater IP</label>
+                  <input type="text" id="cfg-repeater-ip" class="form-input" placeholder="192.168.0.230">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">SNMP Trap Port</label>
+                  <input type="number" id="cfg-trap-port" class="form-input" placeholder="10162">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">USV IP</label>
+                  <input type="text" id="cfg-usv-ip" class="form-input" placeholder="192.168.0.232">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Modbus Port</label>
+                  <input type="number" id="cfg-usv-port" class="form-input" placeholder="502">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">ZTE MF281 IP</label>
+                  <input type="text" id="cfg-zte-ip" class="form-input" placeholder="192.168.0.1">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Omada ER606 IP</label>
+                  <input type="text" id="cfg-omada-ip" class="form-input" placeholder="192.168.0.1">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Karte -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">🗺 Karten-Konfiguration</div></div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+              <div class="form-group">
+                <label class="form-label">Karten-Anbieter</label>
+                <select id="cfg-map-provider" class="form-select">
+                  <option value="osm">OpenStreetMap (Offline-Cache)</option>
+                  <option value="google_roadmap">Google Maps Straßenkarte</option>
+                  <option value="google_satellite">Google Maps Satellit</option>
+                  <option value="google_hybrid">Google Maps Hybrid</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Google/Mapbox API-Key</label>
+                <input type="text" id="cfg-map-api-key" class="form-input" placeholder="AIzaSy...">
+              </div>
+            </div>
+          </div>
+
+          <!-- System -->
+          <div class="card">
+            <div class="card-header"><div class="card-title">⚙ Systemoptionen</div></div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+              <label style="display:flex;align-items:center;gap:var(--space-3);cursor:pointer;">
+                <input type="checkbox" id="cfg-mock-active" style="width:16px;height:16px;">
+                <div>
+                  <div style="font-size:13px;font-weight:500;">Mock-Modus (5 simulierte Einheiten)</div>
+                  <div style="font-size:11px;color:var(--text-muted)">Erzeugt Echtzeit-Telemetrie ohne echte Hardware – Neustart erforderlich</div>
+                </div>
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--space-3);cursor:pointer;">
+                <input type="checkbox" id="cfg-audio-enabled" style="width:16px;height:16px;" checked>
+                <div style="font-size:13px;font-weight:500;">Audio-Aufzeichnung aktiviert</div>
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--space-3);cursor:pointer;">
+                <input type="checkbox" id="cfg-breadcrumbs" style="width:16px;height:16px;" checked>
+                <div style="font-size:13px;font-weight:500;">GPS-Pfade (Breadcrumbs) anzeigen</div>
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--space-3);cursor:pointer;">
+                <input type="checkbox" id="cfg-auto-pan" style="width:16px;height:16px;">
+                <div>
+                  <div style="font-size:13px;font-weight:500;">Auto-Pan bei PTT</div>
+                  <div style="font-size:11px;color:var(--text-muted)">Karte auf sprechende Einheit zentrieren</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" id="btn-save-settings">💾 Einstellungen speichern</button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- Emergency Overlay -->
+<div id="emergency-overlay"></div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Modal: Radio hinzufügen -->
+<div id="modal-add-radio" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:20000;align-items:center;justify-content:center;">
+  <div class="card" style="width:400px;max-width:90vw;">
+    <div class="card-header">
+      <div class="card-title">📻 Funkgerät hinzufügen</div>
+      <button class="btn btn-sm" onclick="document.getElementById('modal-add-radio').style.display='none'">✕</button>
+    </div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+      <div class="form-group">
+        <label class="form-label">Radio-ID *</label>
+        <input type="number" id="new-radio-id" class="form-input" placeholder="z.B. 10001">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Alias / Rufname</label>
+        <input type="text" id="new-radio-alias" class="form-input" placeholder="z.B. ELW 1">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Gerätemodell</label>
+        <input type="text" id="new-radio-model" class="form-input" placeholder="z.B. Hytera PD785G">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Hat GPS</label>
+        <select id="new-radio-gps" class="form-select">
+          <option value="1">Ja</option>
+          <option value="0">Nein (feste Position)</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:var(--space-2);justify-content:flex-end;">
+        <button class="btn" onclick="document.getElementById('modal-add-radio').style.display='none'">Abbrechen</button>
+        <button class="btn btn-primary" id="btn-confirm-add-radio">Hinzufügen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Taktischen Marker hinzufügen -->
+<div id="modal-add-marker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:20000;align-items:center;justify-content:center;">
+  <div class="card" style="width:460px;max-width:92vw;box-shadow:0 12px 32px rgba(0,0,0,0.8);">
+    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="card-title">📍 Taktischen Marker setzen</div>
+      <button class="btn btn-sm btn-icon" id="btn-close-add-marker" title="Schließen">✕</button>
+    </div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+      <div style="display:flex;gap:var(--space-3);">
+        <div class="form-group" style="flex:1;">
+          <label class="form-label" style="font-size:11px;">Breitengrad (Lat)</label>
+          <input type="text" id="new-marker-lat" class="form-input mono" readonly>
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label class="form-label" style="font-size:11px;">Längengrad (Lon)</label>
+          <input type="text" id="new-marker-lon" class="form-input mono" readonly>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Kategorie / Taktisches Zeichen</label>
+        <div class="marker-type-grid" id="marker-type-selector">
+          <div class="marker-type-card active" data-type="feuer" data-label="Feuer / Brand">
+            <span class="icon">🔥</span>
+            <span class="label">Feuer</span>
+          </div>
+          <div class="marker-type-card" data-type="feuerwehr" data-label="Feuerwehr">
+            <span class="icon">🚒</span>
+            <span class="label">Feuerwehr</span>
+          </div>
+          <div class="marker-type-card" data-type="rettung" data-label="Rettungsdienst">
+            <span class="icon">🚑</span>
+            <span class="label">Rettung</span>
+          </div>
+          <div class="marker-type-card" data-type="polizei" data-label="Polizei">
+            <span class="icon">🚓</span>
+            <span class="label">Polizei</span>
+          </div>
+          <div class="marker-type-card" data-type="warnung" data-label="Gefahr">
+            <span class="icon">⚠️</span>
+            <span class="label">Gefahr</span>
+          </div>
+          <div class="marker-type-card" data-type="absperrung" data-label="Sperrung">
+            <span class="icon">🚧</span>
+            <span class="label">Sperre</span>
+          </div>
+          <div class="marker-type-card" data-type="wasser" data-label="Wasserentnahme">
+            <span class="icon">💧</span>
+            <span class="label">Wasser</span>
+          </div>
+          <div class="marker-type-card" data-type="sammelpunkt" data-label="Sammelpunkt">
+            <span class="icon">🏁</span>
+            <span class="label">Sammelpl.</span>
+          </div>
+          <div class="marker-type-card" data-type="einsatzleitung" data-label="Führung / ELW">
+            <span class="icon">🏢</span>
+            <span class="label">Führung</span>
+          </div>
+          <div class="marker-type-card" data-type="info" data-label="Hinweis / Info">
+            <span class="icon">ℹ️</span>
+            <span class="label">Info</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Priorität</label>
+        <select id="new-marker-prio" class="form-select">
+          <option value="normal">Normal (Standard)</option>
+          <option value="high">Hoch (Erhöhte Dringlichkeit)</option>
+          <option value="critical">Kritisch (Höchste Alarmstufe)</option>
+          <option value="low">Niedrig (Information)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Beschreibung / Lageinfo</label>
+        <input type="text" id="new-marker-desc" class="form-input" placeholder="z. B. Hydrant H100 defekt, Fluchtweg versperrt..." autofocus>
+      </div>
+
+      <div style="display:flex;gap:var(--space-2);justify-content:flex-end;margin-top:var(--space-2);">
+        <button class="btn" id="btn-cancel-add-marker">Abbrechen</button>
+        <button class="btn btn-primary" id="btn-confirm-add-marker">Marker setzen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ GLOBAL AUDIO PLAYER FLOATING BAR ════ -->
+<div id="global-audio-bar" class="audio-bar" style="display:none;">
+  <div class="audio-bar-info">
+    <span class="audio-bar-icon">🎙️</span>
+    <div>
+      <div id="audio-bar-title" class="audio-bar-title">Funkspruch</div>
+      <div id="audio-bar-meta" class="audio-bar-meta">—</div>
+    </div>
+  </div>
+  <div class="audio-bar-controls">
+    <button class="btn btn-sm btn-icon" id="audio-rewind-btn" title="5 Sekunden zurückspringen">↺ 5s</button>
+    <button class="btn btn-sm btn-primary btn-icon" id="audio-play-pause-btn" style="min-width:36px;font-size:14px;" title="Abspielen / Pause">▶</button>
+    <div class="audio-time" id="audio-current-time">0:00</div>
+    <input type="range" id="audio-seek-slider" class="audio-slider" value="0" min="0" max="100" step="0.1">
+    <div class="audio-time" id="audio-duration-time">0:00</div>
+  </div>
+  <div class="audio-bar-actions">
+    <div class="audio-speed-group" title="Wiedergabegeschwindigkeit (z. B. 0.8x für schwer verständliche Funksprüche)">
+      <button class="btn btn-xs audio-speed-btn" data-speed="0.8">0.8x</button>
+      <button class="btn btn-xs audio-speed-btn active" data-speed="1.0">1.0x</button>
+      <button class="btn btn-xs audio-speed-btn" data-speed="1.25">1.2x</button>
+    </div>
+    <button class="btn btn-xs audio-boost-btn" id="audio-boost-btn" onclick="toggleAudioBoost()" title="Sprachverstärkung (+6dB) für leise oder undeutliche Funksprüche">🔊 Boost</button>
+    <a id="audio-download-link" href="#" download class="btn btn-sm btn-secondary" title="Als WAV herunterladen">⬇ WAV</a>
+    <button class="btn btn-sm btn-icon" id="audio-close-btn" title="Schließen" style="margin-left:4px;">✕</button>
+  </div>
+  <audio id="global-audio-element" preload="auto"></audio>
+</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

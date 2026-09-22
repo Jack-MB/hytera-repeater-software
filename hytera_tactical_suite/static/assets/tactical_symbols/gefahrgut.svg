@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="48" height="48">
+  <polygon points="50,5 95,50 50,95 5,50" fill="#eab308" stroke="#000000" stroke-width="4"/>
+  <text x="50" y="46" font-family="Arial, sans-serif" font-size="28" font-weight="bold" fill="#000000" text-anchor="middle">⚠️</text>
+  <text x="50" y="72" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#000000" text-anchor="middle">GEFAHR</text>
+</svg>

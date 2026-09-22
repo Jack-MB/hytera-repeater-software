@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+
+# Databases & Runtime State
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.part
+
+# Audio Recordings & Media
+*.wav
+*.mp3
+*.aac
+*.ogg
+*.flac
+/hytera_project/rec/
+/hytera_project/recordings/
+/hytera_command_center/frontend/static/recordings/
+
+# Map Tile Caches (auto-downloaded offline tiles)
+tiles_cache/
+**/tiles_cache/
+static/tiles_cache/
+
+# User Uploads (temporary overlays)
+**/static/uploads/overlay_*
+
+# Build & Distribution
+build/
+dist/
+*.spec
+bin/
+obj/
+*.exe
+
+# Flutter / Dart / Android (tablet_recorder)
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+tablet_recorder/build/
+tablet_recorder/.dart_tool/
+tablet_recorder/.idea/
+tablet_recorder/android/.gradle/
+tablet_recorder/android/local.properties
+tablet_recorder/*.iml
+
+# IDE & OS Files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Temporary & Scratch Files
+audio_lines.txt
+diff_out.txt
+temp_usb.txt
+temp_*.txt
+*.tmp
+*.log

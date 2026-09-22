@@ -1,0 +1,8 @@
+n_rtp(data, addr)  # ganzes RTP-Paket übergeben
+
+            except Exception as e:
+                log.debug(f"[{self.name_}] {e}")
+            self._on_idle_check()   # Hook fuer Idle-Erkennung in Subklassen
+
+        sel.close()
+        for s in so

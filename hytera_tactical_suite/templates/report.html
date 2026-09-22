@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Taktischer Einsatzbericht & Lageprotokoll – Hytera HR1065</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #cbd5e1;
+      --primary: #1e3a8a;
+      --danger: #dc2626;
+      --warning: #d97706;
+      --success: #16a34a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+    .report-container {
+      max-width: 1000px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 36px;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+    }
+    /* Action Bar */
+    .action-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid var(--border);
+    }
+    .btn-print {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-print:hover { background: #1d4ed8; }
+    .btn-back {
+      background: #e2e8f0;
+      color: #334155;
+      text-decoration: none;
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    /* Header */
+    .report-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--primary);
+      padding-bottom: 16px;
+    }
+    .report-title {
+      font-size: 24px;
+      font-weight: 800;
+      color: var(--primary);
+      letter-spacing: 0.5px;
+    }
+    .report-subtitle {
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+    .report-meta-box {
+      text-align: right;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .report-meta-box strong { color: var(--text); }
+
+    /* Key-Value Grid */
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      background: #f1f5f9;
+      padding: 16px;
+      border-radius: 6px;
+      margin-bottom: 24px;
+    }
+    .meta-item { font-size: 13px; }
+    .meta-lbl { color: var(--muted); display: block; font-size: 11px; text-transform: uppercase; font-weight: 700; }
+    .meta-val { font-weight: 700; color: var(--text); }
+
+    /* Summary KPI Cards */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .kpi-card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      text-align: center;
+      background: #fff;
+    }
+    .kpi-num { font-size: 28px; font-weight: 800; color: var(--primary); }
+    .kpi-lbl { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; }
+
+    /* Section Headings */
+    .section-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--primary);
+      margin: 24px 0 10px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+    }
+    th {
+      background: #f1f5f9;
+      font-weight: 700;
+      color: #334155;
+    }
+    tr:nth-child(even) { background: #fafafa; }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .badge-critical { background: #fee2e2; color: #b91c1c; }
+    .badge-high { background: #ffedd5; color: #c2410c; }
+    .badge-normal { background: #e0f2fe; color: #0369a1; }
+    .badge-low { background: #f1f5f9; color: #475569; }
+    .badge-online { background: #dcfce7; color: #15803d; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+    /* Signature Area */
+    .signature-area {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+    .sig-line {
+      border-top: 1px dashed #94a3b8;
+      margin-top: 50px;
+      padding-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    /* Print Styles */
+    @media print {
+      body { background: #fff; padding: 0; }
+      .report-container { border: none; box-shadow: none; padding: 0; max-width: 100%; }
+      .action-bar { display: none !important; }
+      .page-break { page-break-before: always; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="report-container">
+    
+    <!-- Action Bar (Drucken / Zurück) -->
+    <div class="action-bar">
+      <a href="/" class="btn-back">⬅ Zurück zum Lagezentrum</a>
+      <button class="btn-print" onclick="window.print()">🖨️ Bericht drucken / PDF speichern</button>
+    </div>
+
+    <!-- Header -->
+    <div class="report-header">
+      <div>
+        <div class="report-title" id="rep-mission-title">EINSATZPROTOKOLL & TAKTISCHER LAGEBERICHT</div>
+        <div class="report-subtitle">BOS & DMR FUNKFÜHRUNG // HYTERA HR1065 REPEATER</div>
+      </div>
+      <div class="report-meta-box">
+        <div>Einsatz-Nr: <strong id="rep-mission-id">LAGE-2026-001</strong></div>
+        <div>Status: <span id="rep-status" class="badge badge-online">LAUFEND</span></div>
+        <div>Erstellt am: <span id="rep-gen-time" class="mono">--:--:--</span></div>
+      </div>
+    </div>
+
+    <!-- Stammdaten -->
+    <div class="meta-grid" style="grid-template-columns: repeat(5, 1fr);">
+      <div class="meta-item">
+        <span class="meta-lbl">Einsatzleitung:</span>
+        <span id="rep-author" class="meta-val">Leitstelle / ELW 1</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-lbl">Einsatzort / Objekt:</span>
+        <span id="rep-location" class="meta-val">Standardgebiet</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-lbl">Funkkanal:</span>
+        <span id="rep-channel" class="meta-val">Kanal 1 (TS1 & TS2)</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-lbl">Einsatzbeginn:</span>
+        <span id="rep-start-time" class="meta-val mono">--:--:--</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-lbl">Repeater / USV:</span>
+        <span id="rep-tech-status" class="meta-val">Normalbetrieb (Netz)</span>
+      </div>
+    </div>
+
+    <!-- Lageauftrag & Einsatznotizen (falls vorhanden) -->
+    <div id="rep-notes-container" style="display:none;background:#f8fafc;border:1px solid var(--border);border-left:4px solid var(--primary);border-radius:6px;padding:12px 16px;margin-bottom:24px;">
+      <span class="meta-lbl" style="margin-bottom:4px;">LAGEBEURTEILUNG / EINSATZAUFTRAG / NOTIZEN:</span>
+      <div id="rep-notes" style="font-size:13px;color:#1e293b;white-space:pre-wrap;"></div>
+    </div>
+
+    <!-- Kennzahlen -->
+    <div class="kpi-row">
+      <div class="kpi-card">
+        <div id="kpi-radios" class="kpi-num">0</div>
+        <div class="kpi-lbl">Kräfte / Funkgeräte</div>
+      </div>
+      <div class="kpi-card">
+        <div id="kpi-incidents" class="kpi-num">0</div>
+        <div class="kpi-lbl">Erfasste Vorfälle</div>
+      </div>
+      <div class="kpi-card">
+        <div id="kpi-calls" class="kpi-num">0</div>
+        <div class="kpi-lbl">Funksprüche (PTT)</div>
+      </div>
+      <div class="kpi-card">
+        <div id="kpi-emergencies" class="kpi-num" style="color: #dc2626;">0</div>
+        <div class="kpi-lbl">Notrufe / Totmann</div>
+      </div>
+    </div>
+
+    <!-- Abschnitt 1: Vorfälle & Markierungen -->
+    <h2 class="section-title">📍 Vorfallsprotokoll & Taktische Markierungen</h2>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 50px;">Nr.</th>
+          <th style="width: 130px;">Zeit (UTC)</th>
+          <th style="width: 100px;">Kategorie</th>
+          <th style="width: 90px;">Priorität</th>
+          <th style="width: 80px;">Symbol</th>
+          <th>Lagebeschreibung / Maßnahme</th>
+          <th style="width: 100px;">Erfasser</th>
+        </tr>
+      </thead>
+      <tbody id="tbl-incidents">
+        <tr><td colspan="7" style="text-align: center; color: #94a3b8;">Lade Vorfälle...</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Abschnitt 2: Funkstellen & Kräfte -->
+    <h2 class="section-title">📡 Funkstellen- & Kräfteübersicht</h2>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 80px;">DMR-ID</th>
+          <th style="width: 160px;">Rufname / Takt. Einheit</th>
+          <th style="width: 140px;">Gerätemodell</th>
+          <th style="width: 80px;">GPS</th>
+          <th style="width: 90px;">Stockwerk</th>
+          <th style="width: 130px;">Letzter Kontakt</th>
+          <th>Status / Notruf</th>
+        </tr>
+      </thead>
+      <tbody id="tbl-radios">
+        <tr><td colspan="7" style="text-align: center; color: #94a3b8;">Lade Funkstellen...</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Abschnitt 3: Funkverkehrs-Logbuch -->
+    <h2 class="section-title">🎙️ Funkverkehrs-Logbuch (Auszug letzte Transaktionen)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 50px;">ID</th>
+          <th style="width: 130px;">Zeit (UTC)</th>
+          <th style="width: 150px;">Absender</th>
+          <th style="width: 80px;">Zeitschlitz</th>
+          <th style="width: 80px;">Dauer</th>
+          <th style="width: 90px;">Signal (RSSI)</th>
+          <th>Funkart</th>
+        </tr>
+      </thead>
+      <tbody id="tbl-calls">
+        <tr><td colspan="7" style="text-align: center; color: #94a3b8;">Lade Funkverkehr...</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Abschnitt 4: Technische Repeater- & Notstromdaten -->
+    <h2 class="section-title">⚡ Technische Infrastruktur & Notstrom-Telemetrie</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Komponente</th>
+          <th>Status</th>
+          <th>Wichtige Messwerte</th>
+          <th>Netz / Batterie</th>
+          <th>Alarme</th>
+        </tr>
+      </thead>
+      <tbody id="tbl-infra">
+        <tr><td colspan="5" style="text-align: center; color: #94a3b8;">Lade Infrastrukturdaten...</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Unterschriftenfeld -->
+    <div class="signature-area">
+      <div>
+        <div class="sig-line">Lagedienstführer / Einsatzleiter (Name, Dienstgrad, Unterschrift)</div>
+      </div>
+      <div>
+        <div class="sig-line">Funker / Disponent (Name, Datum, Uhrzeit)</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    async function loadReportData() {
+      try {
+        const resp = await fetch("/api/report/data");
+        const data = await resp.json();
+
+        if (data.title && document.getElementById("rep-mission-title")) {
+          document.getElementById("rep-mission-title").textContent = data.title;
+        }
+        document.getElementById("rep-mission-id").textContent = data.mission_id || "LAGE-01";
+        document.getElementById("rep-gen-time").textContent = new Date(data.generated_at).toLocaleString();
+        document.getElementById("rep-author").textContent = data.author;
+        if (document.getElementById("rep-location")) {
+          document.getElementById("rep-location").textContent = data.location || "Einsatzgebiet";
+        }
+        document.getElementById("rep-channel").textContent = data.channel;
+        document.getElementById("rep-start-time").textContent = new Date(data.start_time).toLocaleTimeString();
+
+        // Status
+        const stEl = document.getElementById("rep-status");
+        if (stEl) {
+          const st = (data.status || "running").toLowerCase();
+          if (st === "finished") {
+            stEl.textContent = "BEENDET";
+            stEl.className = "badge badge-low";
+          } else if (st === "preparation") {
+            stEl.textContent = "VORBEREITUNG";
+            stEl.className = "badge badge-high";
+          } else {
+            stEl.textContent = "LAUFEND";
+            stEl.className = "badge badge-online";
+          }
+        }
+
+        // Notizen
+        const notesBox = document.getElementById("rep-notes-container");
+        const notesEl = document.getElementById("rep-notes");
+        if (notesBox && notesEl && data.notes && data.notes.trim().length > 0) {
+          notesEl.textContent = data.notes;
+          notesBox.style.display = "block";
+        }
+
+        // KPIs
+        document.getElementById("kpi-radios").textContent = data.summary.total_radios;
+        document.getElementById("kpi-incidents").textContent = data.summary.total_incidents;
+        document.getElementById("kpi-calls").textContent = data.summary.total_calls;
+        document.getElementById("kpi-emergencies").textContent = data.summary.active_emergencies;
+
+        // Vorfälle
+        const incBody = document.getElementById("tbl-incidents");
+        if (!data.markers || data.markers.length === 0) {
+          incBody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;">Keine Vorfälle erfasst</td></tr>';
+        } else {
+          incBody.innerHTML = data.markers.map((m, idx) => `
+            <tr>
+              <td class="mono">#${m.id}</td>
+              <td class="mono">${new Date(m.timestamp).toLocaleTimeString()}</td>
+              <td><strong>${m.typ}</strong></td>
+              <td><span class="badge badge-${m.prioritaet}">${m.prioritaet.toUpperCase()}</span></td>
+              <td>${m.tactical_symbol ? `<span class="mono bold">[${m.tactical_symbol.toUpperCase()}]</span>` : '-'}</td>
+              <td>${m.beschreibung}</td>
+              <td>${m.author || 'Operator'}</td>
+            </tr>
+          `).join("");
+        }
+
+        // Funkstellen
+        const radBody = document.getElementById("tbl-radios");
+        radBody.innerHTML = data.radios.map(r => `
+          <tr>
+            <td class="mono bold">${r.radio_id}</td>
+            <td><strong>${r.alias}</strong></td>
+            <td style="color:#64748b;">${r.device_model || '-'}</td>
+            <td>${r.has_gps ? '<span class="badge badge-online">GPS AKTIV</span>' : '<span class="badge badge-low">KEIN GPS</span>'}</td>
+            <td><span class="badge badge-normal">${r.floor_level || 'EG'}</span></td>
+            <td class="mono">${r.last_seen ? new Date(r.last_seen).toLocaleTimeString() : '-'}</td>
+            <td>${r.is_emergency ? '<span class="badge badge-critical">🚨 NOTRUF AKTIV</span>' : '<span class="badge badge-online">BEREIT</span>'}</td>
+          </tr>
+        `).join("");
+
+        // Funksprüche
+        const callBody = document.getElementById("tbl-calls");
+        callBody.innerHTML = data.calls.map(c => `
+          <tr>
+            <td class="mono">#${c.id}</td>
+            <td class="mono">${new Date(c.timestamp).toLocaleTimeString()}</td>
+            <td><strong>${c.alias || ('Radio ' + c.radio_id)}</strong></td>
+            <td><span class="badge badge-normal">${c.slot}</span></td>
+            <td class="mono">${(c.duration_ms / 1000).toFixed(1)}s</td>
+            <td class="mono bold">${c.rssi ? c.rssi + ' dBm' : '-'}</td>
+            <td>${c.typ}</td>
+          </tr>
+        `).join("");
+
+        // Infrastruktur
+        const infra = data.infrastructure;
+        const infBody = document.getElementById("tbl-infra");
+        infBody.innerHTML = `
+          <tr>
+            <td><strong>Hytera HR1065 Repeater</strong></td>
+            <td><span class="badge badge-online">${infra.repeater.status.toUpperCase()}</span></td>
+            <td>Temp: ${infra.repeater.temperature_c}°C | VSWR: ${infra.repeater.vswr} | TX: ${infra.repeater.forward_power_w}W</td>
+            <td>13.8 V DC (Normal)</td>
+            <td>${infra.repeater.pa_overheat_alarm || infra.repeater.high_vswr_alarm ? '<span class="badge badge-critical">ALARM</span>' : '<span class="badge badge-online">KEINE</span>'}</td>
+          </tr>
+          <tr>
+            <td><strong>BlueWalker USV Notstrom</strong></td>
+            <td><span class="badge badge-online">${infra.usv.status.toUpperCase()}</span></td>
+            <td>Ladung: ${infra.usv.battery_charge_percent}% | Restlaufzeit: ${infra.usv.runtime_remaining_min} Min | Last: ${infra.usv.load_percent}%</td>
+            <td>${infra.usv.mains_online ? '<span class="badge badge-online">NETZBETRIEB</span>' : '<span class="badge badge-critical">BATTERIEBETRIEB</span>'}</td>
+            <td>${infra.usv.alarm_active ? '<span class="badge badge-critical">NOTSTROM ALARM</span>' : '<span class="badge badge-online">KEINE</span>'}</td>
+          </tr>
+          <tr>
+            <td><strong>ZTE MF281 LTE-Router</strong></td>
+            <td><span class="badge badge-online">${infra.router.status.toUpperCase()}</span></td>
+            <td>Signal: ${infra.router.signal_bars}/5 Balken (${infra.router.rsrp_dbm} dBm) | Latenz: ${infra.router.ping_ms} ms</td>
+            <td>WAN IP: ${infra.router.wan_ip} (${infra.router.provider})</td>
+            <td><span class="badge badge-online">STABIL</span></td>
+          </tr>
+        `;
+
+      } catch (err) {
+        console.error("Fehler beim Laden des Berichts:", err);
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", loadReportData);
+  </script>
+</body>
+</html>

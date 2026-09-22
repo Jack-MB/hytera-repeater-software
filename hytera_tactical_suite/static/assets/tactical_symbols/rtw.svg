@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 80" width="48" height="38">
+  <rect x="5" y="15" width="90" height="55" rx="4" fill="#ffffff" stroke="#ef4444" stroke-width="3"/>
+  <circle cx="25" cy="70" r="8" fill="#334155" stroke="#94a3b8" stroke-width="2"/>
+  <circle cx="75" cy="70" r="8" fill="#334155" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="44" y="20" width="12" height="20" fill="#ef4444"/>
+  <rect x="40" y="24" width="20" height="12" fill="#ef4444"/>
+  <text x="50" y="58" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#0f172a" text-anchor="middle">RTW</text>
+</svg>

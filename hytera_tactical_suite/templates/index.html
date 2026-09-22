@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hytera HR1065 – Taktische Suite & Lagezentrum</title>
+  
+  <!-- Lokale Leaflet CSS mit Fallback -->
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <!-- Lokale vis.js Timeline CSS mit Fallback -->
+  <link rel="stylesheet" href="/static/vendor/vis/vis-timeline-graph2d.min.css">
+  
+  <!-- Haupt-Stylesheet (Business Casual & Taktisch Dark) -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="theme-business">
+
+  <!-- ==================== NOTRUF / TOTMANN WARNBANNER ==================== -->
+  <div id="emergency-banner" class="emergency-banner-hidden">
+    <div class="emergency-content">
+      <span class="emergency-siren">🚨</span>
+      <span class="emergency-title">PRIORITÄTS-NOTRUF AKTIV:</span>
+      <span id="emergency-unit-text" class="emergency-unit">Jan2 (ELW 1)</span>
+      <span id="emergency-type-badge" class="emergency-badge">MAN-DOWN / NOTRUF</span>
+      <span class="emergency-timer-lbl">Dauer:</span>
+      <span id="emergency-timer-val" class="emergency-timer mono">00:00 min</span>
+      <button id="btn-ack-emergency" class="btn btn-emergency-ack">✅ NOTRUF QUITTIEREN</button>
+      <button id="btn-focus-emergency" class="btn btn-emergency-focus">🎯 ZUR EINHEIT</button>
+    </div>
+  </div>
+
+  <!-- ==================== GEOFENCE ALARMBANNER ==================== -->
+  <div id="geofence-banner" class="geofence-banner-hidden">
+    <span class="geofence-icon">⚠️</span>
+    <span id="geofence-banner-text">GEOFENCE-WARNUNG: Einheit hat Gefahrenzone betreten!</span>
+    <button id="btn-geofence-dismiss" class="btn-close-banner">&times;</button>
+  </div>
+
+  <!-- ==================== TOP HEADER / NAVIGATION ==================== -->
+  <header id="hud-header">
+    <div class="hud-brand">
+      <div class="hud-logo-icon">📡</div>
+      <div class="hud-title-wrap">
+        <h1 class="hud-title">HYTERA HR1065 // TACTICAL SUITE</h1>
+        <span class="hud-subtitle">DMR DISPATCH, NOTRUF & TACTICAL INCIDENT TIMELINE</span>
+      </div>
+    </div>
+
+    <!-- Live Status & Funk-Warnbanner -->
+    <div id="ptt-alert-banner" class="ptt-banner-idle">
+      <span id="ptt-pulse-icon" class="ptt-icon">🎙️</span>
+      <span id="ptt-banner-text">FUNKBEREITSCHAFT IDLE</span>
+    </div>
+
+    <!-- Schnell-Statistiken & Infrastruktur-Status -->
+    <div class="hud-telemetry">
+      <div class="telem-item">
+        <span class="telem-lbl">GPS:</span>
+        <span id="stat-radios-gps" class="telem-val">0</span>
+      </div>
+      <div class="telem-item">
+        <span class="telem-lbl">NO-GPS:</span>
+        <span id="stat-radios-nogps" class="telem-val">0</span>
+      </div>
+      <div class="telem-item telem-secondary">
+        <span class="telem-lbl">MARKER:</span>
+        <span id="stat-markers" class="telem-val">0</span>
+      </div>
+      <div id="pill-repeater" class="telem-item pill-btn" title="Hytera HR1065 Repeater-Status (Klicken für Details)">
+        <span class="telem-lbl">📡 RPT:</span>
+        <span id="stat-repeater-summary" class="telem-val">OFFLINE</span>
+      </div>
+      <div id="pill-usv" class="telem-item pill-btn" title="BlueWalker USV Notstromstatus (Klicken für Details)">
+        <span class="telem-lbl">⚡ USV:</span>
+        <span id="stat-usv-summary" class="telem-val">OFFLINE</span>
+      </div>
+      <div id="pill-router" class="telem-item pill-btn" title="ZTE LTE-Router Status (Klicken für Details)">
+        <span class="telem-lbl">📶 LTE:</span>
+        <span id="stat-router-summary" class="telem-val">OFFLINE</span>
+      </div>
+      <div id="pill-vpn" class="telem-item pill-btn" title="Tailscale VPN-Status & Fernzugriff (Klicken für Details)">
+        <span class="telem-lbl">🌐 VPN:</span>
+        <span id="stat-vpn-summary" class="telem-val">OFFLINE</span>
+      </div>
+      <div class="telem-item telem-secondary">
+        <span class="telem-lbl">ZEIT UTC:</span>
+        <span id="clock-utc" class="telem-val mono">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- System-Aktionen & Status -->
+    <div class="hud-actions">
+      <button id="btn-open-infra" class="btn btn-theme" title="Repeater, USV, Router & VPN Infrastruktur (Taste: I)">
+        ⚡ <span class="btn-label-long">INFRA</span>
+      </button>
+      <button id="btn-open-settings" class="btn btn-theme" title="Systemeinstellungen & Optionen (Taste: O)">
+        ⚙️ <span class="btn-label-long">SETUP</span>
+      </button>
+      <button id="btn-theme-toggle" class="btn btn-theme" title="Design umschalten (Business Casual / Taktisch Dark)">
+        <span id="theme-icon">💼</span>
+        <span id="theme-label">BUSINESS CASUAL</span>
+      </button>
+
+      <div class="hud-connection">
+        <div id="conn-dot" class="dot-connecting" title="Verbinde mit Live-Server..."></div>
+        <span id="conn-status-text">VERBINDE...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================== WERKZEUGLEISTE MIT TOGGLES & AKTIONEN ==================== -->
+  <nav id="hud-toolbar">
+    <!-- Zone 1: Navigation, Schnellsuche & Werkzeuge -->
+    <div class="tool-group">
+      <button id="btn-live-toggle" class="btn btn-active" title="Live-Stream aktiv (Taste: L)">
+        <span class="btn-dot live-dot"></span> LIVE
+      </button>
+      <button id="btn-recenter" class="btn" title="Karte auf Einsatzgebiet zentrieren (Taste: Leertaste)">
+        🎯 <span class="btn-label-long">ZENTRIEREN</span><span class="btn-label-short">FOKUS</span>
+      </button>
+      <button id="btn-map-compass" class="btn" title="Karte auf Nord ausrichten / Reset (Taste: N)">
+        <span id="compass-icon" class="compass-icon">🧭</span> <span id="compass-angle-label">0° NORD</span>
+      </button>
+      <button id="btn-rotate-left" class="btn btn-icon" title="Karte 15° links drehen (Taste: Shift+R)">↩️</button>
+      <button id="btn-rotate-right" class="btn btn-icon" title="Karte 15° rechts drehen (Taste: R)">↪️</button>
+      <button id="btn-measure-tool" class="btn" title="Distanzmessung aktivieren (Lineal)">
+        📏 <span class="btn-label-long">MESSEN</span><span class="btn-label-short">DISTANZ</span>
+      </button>
+
+      <!-- Schnellsuche auf der Karte -->
+      <div class="map-search-wrapper" id="map-search-wrapper">
+        <span class="map-search-icon">🔍</span>
+        <input type="text" id="input-map-search" class="map-search-input" placeholder="Ort, Koordinate..." autocomplete="off">
+        <button id="btn-clear-map-search" class="btn-clear-search" title="Suche leeren" style="display:none;">&times;</button>
+        <div id="map-search-dropdown" class="map-search-dropdown" style="display:none;"></div>
+      </div>
+    </div>
+
+    <!-- Zone 2: Primäre Einsatz-Aktionen (Hervorgehoben) -->
+    <div class="tool-group tool-group-center">
+      <button id="btn-open-mission" class="btn btn-mission" title="Einsatz-Stammdaten, Einsatzleiter & Lage verwalten">
+        📋 <span id="toolbar-mission-title">EINSATZ: LAGEZENTRUM</span>
+      </button>
+      <button id="btn-add-marker-mode" class="btn btn-cta" title="Neuen Einsatzmarker erfassen (Taste: N)">
+        ➕ <span class="btn-label-long">NEUER VORFALL</span><span class="btn-label-short">VORFALL</span>
+      </button>
+      <button id="btn-open-georef" class="btn btn-action" title="Lagepläne verwalten & per GPS verankern">
+        📐 <span class="btn-label-long">PLÄNE &amp; KALIBRIERUNG</span><span class="btn-label-short">PLÄNE</span>
+      </button>
+      <button id="btn-open-geofence" class="btn" title="Sicherheitszonen & Geofencing verwalten">
+        🛡️ <span class="btn-label-long">GEOFENCING</span><span class="btn-label-short">ZONEN</span>
+      </button>
+      <a href="/report" target="_blank" class="btn btn-report" title="Offiziellen Einsatzbericht öffnen / drucken">
+        📄 <span class="btn-label-long">EINSATZBERICHT</span><span class="btn-label-short">BERICHT</span>
+      </a>
+    </div>
+
+    <!-- Zone 3: Stockwerke, Ebenen-Dropdown, Zeitstrahl & Seitenleiste -->
+    <div class="tool-group right-align">
+      <!-- Stockwerk-Schnellwähler -->
+      <div class="floor-selector-wrap">
+        <span class="floor-lbl">ETAGE:</span>
+        <div class="floor-btn-group">
+          <button class="btn-floor" data-floor="Außen">Außen</button>
+          <button class="btn-floor" data-floor="UG">UG</button>
+          <button class="btn-floor active" data-floor="EG">EG</button>
+          <button class="btn-floor" data-floor="1. OG">1. OG</button>
+          <button class="btn-floor" data-floor="2. OG">2. OG</button>
+        </div>
+      </div>
+
+      <!-- Kompaktes Dropdown: Ebenen & Filter -->
+      <div class="dropdown-wrapper">
+        <button id="btn-dropdown-layers" class="btn btn-dropdown" title="Karten-Ebenen, Overlays und Filter steuern">
+          🗺️ <span class="btn-label-long">EBENEN &amp; FILTER ▾</span><span class="btn-label-short">EBENEN ▾</span>
+        </button>
+        <div id="dropdown-layers-menu" class="dropdown-menu-hidden">
+          <div class="dropdown-header">BASISKARTE / PROVIDER</div>
+          <div class="dropdown-item">
+            <select id="select-quick-map-provider" class="btn btn-block" style="text-align:left;font-size:11px;padding:5px 8px;cursor:pointer;">
+              <option value="osm">🌐 OSM / Lokaler Cache (Autark)</option>
+              <option value="google_roadmap">🗺️ Google Maps Straße</option>
+              <option value="google_satellite">🛰️ Google Maps Satellit</option>
+              <option value="google_hybrid">🛰️ Google Maps Hybrid</option>
+              <option value="google_terrain">⛰️ Google Maps Gelände</option>
+              <option value="mapbox">🗺️ Mapbox Satellit</option>
+            </select>
+          </div>
+          <div class="dropdown-header">KARTEN-EBENEN</div>
+          <div class="dropdown-item">
+            <button id="btn-overlay-toggle" class="btn btn-active btn-block">🗺️ LAGEPLAN: AN</button>
+          </div>
+          <div class="dropdown-item slider-item">
+            <span class="slider-lbl">DECKKRAFT:</span>
+            <input type="range" id="overlay-opacity-slider" min="10" max="100" value="85">
+            <span id="overlay-opacity-val" class="slider-num">85%</span>
+          </div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-header">KARTEN-ROTATION & AUSRICHTUNG</div>
+          <div class="dropdown-item slider-item">
+            <span class="slider-lbl">ROTATION:</span>
+            <input type="range" id="map-rotation-slider" min="0" max="355" step="5" value="0">
+            <span id="map-rotation-val" class="slider-num">0°</span>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-trackup-toggle" class="btn btn-block" title="Karte an Bewegungsrichtung des aktiven Funkgeräts ausrichten">🧭 TRACK-UP: AUS</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-reset-rotation" class="btn btn-secondary btn-block">🧭 NORD-AUSRICHTUNG (0°)</button>
+          </div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-item">
+            <button id="btn-rssi-toggle" class="btn btn-block">📶 HF-PEGEL / HEATMAP: AUS</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-breadcrumbs-toggle" class="btn btn-active btn-block">👣 SPUREN: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-markers-toggle" class="btn btn-active btn-block">📍 MARKER: AN</button>
+          </div>
+          <div class="dropdown-header">FUNKGERÄTE-FILTER</div>
+          <div class="dropdown-item">
+            <button id="btn-gps-tracking-toggle" class="btn btn-active btn-block">🛰️ GPS-TRACKING: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-nogps-toggle" class="btn btn-active btn-block">📻 GERÄTE OHNE GPS: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-ptt-pulse-toggle" class="btn btn-active btn-block">💥 PTT-PULS: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-autopan-toggle" class="btn btn-block">🎥 AUTO-PAN: AUS</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-audio-toggle" class="btn btn-active btn-block">🔊 FUNKTONE: AN</button>
+          </div>
+          <div class="dropdown-header">OFFLINE-AUTARKIE</div>
+          <div class="dropdown-item">
+            <button id="btn-preload-tiles" class="btn btn-secondary btn-block">💾 OFFLINE-KARTEN CACHEN</button>
+          </div>
+          <div class="dropdown-header">SYSTEM &amp; INFRASTRUKTUR</div>
+          <div class="dropdown-item">
+            <button id="btn-dropdown-infra" class="btn btn-secondary btn-block">⚡ HARDWARE-ÜBERWACHUNG</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-dropdown-settings" class="btn btn-secondary btn-block">⚙️ SYSTEMEINSTELLUNGEN</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- System-Buttons -->
+      <button id="btn-toggle-timeline" class="btn btn-active" title="Zeitstrahl ein-/ausblenden (Taste: T)">
+        ⏱️ <span class="btn-label-long">ZEITSTRAHL</span><span class="btn-label-short">ZEIT</span>
+      </button>
+      <button id="btn-toggle-sidebar" class="btn btn-active" title="Seitenleiste ein-/ausklappen (Taste: S)">
+        📋 <span class="btn-label-long">SEITENLEISTE</span><span class="btn-label-short">FUNK</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ==================== HAUPT-LAYOUT (KARTE + SIDEBAR) ==================== -->
+  <div id="hud-main-container">
+    
+    <!-- Karten-Bereich -->
+    <main id="hud-map-wrapper">
+      <div id="map"></div>
+
+      <!-- Schwebendes Widget: Letzte Funksprüche mit Audio-Playback -->
+      <div id="hud-call-log" class="hud-call-log">
+        <div class="call-log-header">
+          <span class="call-log-title">🎙️ LETZTE FUNKSPRÜCHE</span>
+          <span id="call-log-count" class="call-log-count badge-online">0 Aktiv</span>
+        </div>
+        <div id="call-log-list" class="call-log-list">
+          <div class="call-log-empty">Warte auf Funkverkehr...</div>
+        </div>
+      </div>
+
+      <!-- Kalibrierungs-Dock für Lageplan-Georeferenzierung -->
+      <div id="georef-dock" class="georef-dock-hidden">
+        <div class="georef-dock-header">
+          <span class="georef-dock-title">📐 PLAN-VERANKERUNG AKTIV</span>
+          <span class="georef-dock-hint">Ziehen Sie die 4 Eck-Punkte oder das Zentrum passgenau über das Gelände</span>
+        </div>
+        <div class="georef-dock-controls">
+          <div class="georef-ctrl-group">
+            <span class="ctrl-lbl">Transparenz:</span>
+            <input type="range" id="georef-opacity-slider" min="10" max="100" value="80">
+            <span id="georef-opacity-val" class="ctrl-val">80%</span>
+          </div>
+          <div class="georef-ctrl-group">
+            <span class="ctrl-lbl">Drehung:</span>
+            <input type="range" id="georef-rotation-slider" min="0" max="355" step="1" value="0">
+            <span id="georef-rotation-val" class="ctrl-val">0°</span>
+          </div>
+          <button type="button" id="btn-georef-rotate-cw" class="btn btn-secondary">🔄 90° Drehen</button>
+          <button type="button" id="btn-georef-fit" class="btn btn-secondary">📐 Auf Ansicht anpassen</button>
+          <button type="button" id="btn-georef-save" class="btn btn-cta">💾 PLAN SPEICHERN & VERANKERN</button>
+          <button type="button" id="btn-georef-cancel" class="btn btn-danger">ABBRECHEN</button>
+        </div>
+      </div>
+
+      <!-- Distanz-Messungs Dock (Lineal) -->
+      <div id="measure-dock" class="measure-dock-hidden">
+        <div class="measure-info">
+          <span class="measure-icon">📏</span>
+          <span>Gemessene Distanz: <strong id="measure-distance-text" class="mono">0 m</strong> (<span id="measure-points-count">0</span> Punkte)</span>
+        </div>
+        <div class="measure-actions">
+          <button type="button" id="btn-measure-reset" class="btn btn-secondary">Zurücksetzen</button>
+          <button type="button" id="btn-measure-finish" class="btn btn-primary">Beenden</button>
+        </div>
+      </div>
+
+      <!-- Vorfalls-Erfassungs-Hinweis (Rechtsklick / Klick auf Karte) -->
+      <div id="map-mode-indicator" class="map-mode-hidden">
+        <span>📍 Klick auf die Karte setzt den neuen Vorfalls-Marker</span>
+        <button id="btn-cancel-map-mode" class="btn btn-danger btn-sm">Abbrechen (Esc)</button>
+      </div>
+
+      <!-- Mini Audio Player Widget -->
+      <div id="mini-audio-player" class="mini-player-hidden">
+        <span class="mini-player-icon">🔊</span>
+        <span id="mini-player-title" class="mini-player-title">Wiedergabe...</span>
+        <audio id="global-audio-element" controls preload="auto"></audio>
+        <button id="btn-close-audio-player" class="btn-close">&times;</button>
+      </div>
+    </main>
+
+    <!-- Seitenleiste: Funkgeräte & Einheiten -->
+    <aside id="hud-sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title-row">
+          <h2 class="sidebar-title">📻 FUNKSTELLEN // EINHEITEN</h2>
+          <div class="sidebar-title-actions">
+            <button id="btn-open-radios-mgmt" class="btn btn-sm btn-primary" title="Funkgeräte verwalten, anlegen & löschen">
+              ➕ GERÄTE
+            </button>
+            <span id="sidebar-unit-count" class="sidebar-badge">0</span>
+          </div>
+        </div>
+
+        <!-- Schnellsuche nach Alias, DMR-ID oder Modell -->
+        <div class="sidebar-search-box">
+          <input type="text" id="input-radio-search" placeholder="🔍 Funkgerät suchen (Name, ID, Typ)..." autocomplete="off">
+          <button id="btn-clear-search" class="btn-clear" title="Suche leeren">&times;</button>
+        </div>
+
+        <div class="sidebar-sub-hint">
+          <span>Tipp: Geräte ohne GPS können direkt per Drag & Drop auf die Karte platziert werden.</span>
+        </div>
+      </div>
+
+      <div id="radio-list" class="radio-list">
+        <div class="sidebar-empty">Lade Funkgeräte...</div>
+      </div>
+
+      <!-- Vorfalls-Schnellübersicht -->
+      <div class="sidebar-incidents-section">
+        <div class="incidents-header">
+          <span class="incidents-title">📍 VORFÄLLE (<span id="sidebar-incident-count">0</span>)</span>
+        </div>
+        <div id="incident-quick-list" class="incident-quick-list">
+          <div class="sidebar-empty">Keine aktiven Vorfälle</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ==================== ZEITSTRAHL / TIMELINE UNTEN ==================== -->
+  <footer id="hud-timeline-dock">
+    <div class="timeline-header-bar">
+      <div class="timeline-title-group">
+        <span class="tl-icon">⏱️</span>
+        <span class="tl-title">TAKTIK-TIMELINE // HISTORIE & REPLAY</span>
+      </div>
+
+      <div class="timeline-controls">
+        <span class="tl-lbl">MODUS:</span>
+        <span id="tl-mode-badge" class="badge-live">🔴 ECHTZEIT (LIVE)</span>
+
+        <span class="tl-lbl">ZEITPUNKT:</span>
+        <span id="tl-current-time-display" class="mono bold">--:--:--</span>
+
+        <!-- Replay Schnellsprung-Tasten -->
+        <div class="tl-quick-jumps">
+          <button id="btn-replay-jump-1m" class="btn btn-sm" title="1 Minute zurückspringen">⏪ -1m</button>
+          <button id="btn-replay-jump-5m" class="btn btn-sm" title="5 Minuten zurückspringen">⏪ -5m</button>
+          <button id="btn-replay-jump-15m" class="btn btn-sm" title="15 Minuten zurückspringen">⏪ -15m</button>
+          <button id="btn-replay-return-live" class="btn btn-sm btn-primary" title="Sofort zum Live-Stream zurückkehren (Taste: L)">▶️ LIVE</button>
+        </div>
+
+        <!-- Replay Playback Buttons -->
+        <button id="btn-replay-play" class="btn btn-sm" title="Replay abspielen / pausieren">▶ PLAY</button>
+        
+        <span class="tl-lbl">TEMPO:</span>
+        <select id="select-replay-speed" class="tl-select">
+          <option value="1">1x</option>
+          <option value="5" selected>5x</option>
+          <option value="10">10x</option>
+          <option value="30">30x</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Scrubber Slider -->
+    <div class="timeline-scrubber-container">
+      <input type="range" id="timeline-scrubber" min="0" max="1000" value="1000" class="timeline-slider">
+    </div>
+
+    <!-- Vis.js Timeline Graph Container -->
+    <div id="visualization-timeline"></div>
+  </footer>
+
+  <!-- ==================== MODAL 1: NEUER VORFALL (MIT DV 102 SYMBOLEN) ==================== -->
+  <div id="marker-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="marker-modal" class="tactical-modal">
+      <div class="modal-header">
+        <h3 class="modal-title">📍 NEUEN VORFALL ERFASSEN</h3>
+        <button id="btn-marker-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <form id="form-create-marker">
+        <div class="modal-body">
+          <div class="form-row coords-row">
+            <div class="form-group half">
+              <label>Breitengrad (Lat):</label>
+              <input type="number" step="0.000001" id="input-marker-lat" required readonly class="mono">
+            </div>
+            <div class="form-group half">
+              <label>Längengrad (Lon):</label>
+              <input type="number" step="0.000001" id="input-marker-lon" required readonly class="mono">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label>Vorfalls-Kategorie:</label>
+              <select id="select-marker-type" required>
+                <option value="incident">Einsatz / Vorfall</option>
+                <option value="hazard">Gefahrenstelle</option>
+                <option value="medical">Medizinischer Notfall</option>
+                <option value="checkpoint">Kontrollpunkt / Posten</option>
+                <option value="roadblock">Straßensperre</option>
+                <option value="base">Einsatzleitung / Sammelplatz</option>
+                <option value="info">Hinweis / Information</option>
+              </select>
+            </div>
+            <div class="form-group half">
+              <label>Priorität:</label>
+              <select id="select-marker-priority" required>
+                <option value="low">Niedrig (Info)</option>
+                <option value="normal" selected>Normal</option>
+                <option value="high">Hoch (Dringend)</option>
+                <option value="critical">Kritisch (Gefahr im Verzug)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Taktisches Zeichen (DV 102 BOS) -->
+          <div class="form-group">
+            <label>Taktisches BOS-Zeichen (DV 102):</label>
+            <div class="tactical-symbol-selector">
+              <label class="sym-option active"><input type="radio" name="tactical_symbol" value="" checked> <span>Kein Symbol</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="elw"> <img src="/static/assets/tactical_symbols/elw.svg" alt="ELW"> <span>ELW 1</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="hlf"> <img src="/static/assets/tactical_symbols/hlf.svg" alt="HLF"> <span>HLF 20</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="rtw"> <img src="/static/assets/tactical_symbols/rtw.svg" alt="RTW"> <span>RTW</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="feuer"> <img src="/static/assets/tactical_symbols/feuer.svg" alt="Feuer"> <span>Brand</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="sammelplatz"> <img src="/static/assets/tactical_symbols/sammelplatz.svg" alt="Sammelplatz"> <span>Sammelplatz</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="gefahrgut"> <img src="/static/assets/tactical_symbols/gefahrgut.svg" alt="Gefahr"> <span>Gefahr</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="sperre"> <img src="/static/assets/tactical_symbols/sperre.svg" alt="Sperre"> <span>Sperre</span></label>
+              <label class="sym-option"><input type="radio" name="tactical_symbol" value="bereitstellung"> <img src="/static/assets/tactical_symbols/bereitstellung.svg" alt="Bereitstellung"> <span>Bereitstellung</span></label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Beschreibung / Lage & Befehle:</label>
+            <textarea id="input-marker-desc" rows="3" required placeholder="z. B. Rauchentwicklung Gebäude B, Trupp 1 unter PA zur Erkundung"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label>Erfasser / Disponent:</label>
+            <input type="text" id="input-marker-author" value="Disponent 1 (Leitstelle)">
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="btn-marker-modal-cancel" class="btn">Abbrechen</button>
+          <button type="submit" class="btn btn-cta">VORFALL SPEICHERN</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 2: EINSTELLUNGEN & FUNKTIONS-TOGGLES ==================== -->
+  <div id="settings-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="settings-modal" class="tactical-modal settings-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">⚙️ SYSTEMEINSTELLUNGEN & TAKTIK-OPTIONEN</h3>
+        <button id="btn-settings-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="settings-grid">
+          <!-- Spalte 1: GPS & Funk-Optionen -->
+          <div class="settings-column">
+            <h4 class="settings-section-title">Funk & Tracking</h4>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-gps-tracking" checked>
+              <span class="setting-info">
+                <strong>Globales GPS-Tracking</strong>
+                <span class="setting-desc">Empfängt und visualisiert Live-GPS-Koordinaten der Funkgeräte.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-show-nogps" checked>
+              <span class="setting-info">
+                <strong>Handfunkgeräte ohne GPS anzeigen</strong>
+                <span class="setting-desc">Zeigt auch Einheiten ohne GPS-Empfänger in der Seitenleiste an.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-allow-manual" checked>
+              <span class="setting-info">
+                <strong>Manuelles Platzieren erlauben</strong>
+                <span class="setting-desc">Ermöglicht das Verschieben von No-GPS Funkgeräten auf feste Positionen.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-rssi-layer">
+              <span class="setting-info">
+                <strong>Funkpegel-Heatmap (RSSI)</strong>
+                <span class="setting-desc">Blendet die HF-Signalstärkenkarte auf dem Gelände ein.</span>
+              </span>
+            </label>
+
+            <!-- Notruf Simulator Test -->
+            <div class="settings-action-box">
+              <h5 class="action-box-title">🚨 Notruf / Totmann Testen</h5>
+              <p class="action-box-desc">Löst einen Notruf-Testalarm für die ausgewählte Einheit aus:</p>
+              <div class="test-emergency-row">
+                <select id="select-test-emergency-radio"></select>
+                <button type="button" id="btn-trigger-test-emergency" class="btn btn-danger btn-sm">Notruf auslösen</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Spalte 2: Visuelle Effekte & Mock -->
+          <div class="settings-column">
+            <h4 class="settings-section-title">Darstellung & Simulation</h4>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-ptt-pulse" checked>
+              <span class="setting-info">
+                <strong>PTT-Puls-Effekt & Nachleuchten</strong>
+                <span class="setting-desc">Zeigt farbige Funkringe bei Sendebetrieb und 12s Nachleuchten.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-autopan">
+              <span class="setting-info">
+                <strong>Auto-Pan bei Funkspruch</strong>
+                <span class="setting-desc">Zentriert die Karte automatisch auf die sprechende Einheit.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-breadcrumbs" checked>
+              <span class="setting-info">
+                <strong>Bewegungsspuren (Breadcrumbs)</strong>
+                <span class="setting-desc">Zeichnet die Bewegungspfade der Einsatzkräfte farblich nach.</span>
+              </span>
+            </label>
+
+            <label class="setting-toggle-row">
+              <input type="checkbox" id="toggle-opt-audio" checked>
+              <span class="setting-info">
+                <strong>Akustische Signaltöne</strong>
+                <span class="setting-desc">Spielt Funk-Gongs, Quittungstöne und Sirenen über Web Audio ab.</span>
+              </span>
+            </label>
+
+            <div class="settings-action-box">
+              <h5 class="action-box-title">🔄 Mock-Telemetrie (Flottensimulation)</h5>
+              <p class="action-box-desc">Steuert den integrierten Simulator für 5 Einsatzkräfte:</p>
+              <button type="button" id="btn-toggle-mock-sim" class="btn btn-secondary btn-block">
+                Simulator Pausieren / Starten
+              </button>
+            </div>
+        </div>
+      </div>
+
+        <!-- Sektion: Kartenanbieter & Google Maps / Mapbox API-Key -->
+        <div class="settings-map-provider-box" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border-subtle);">
+          <h4 class="settings-section-title">🗺️ Kartenanbieter & API-Schlüssel (Google Maps / Mapbox)</h4>
+          <div class="form-row">
+            <div class="form-group half">
+              <label>Basiskarte / Provider:</label>
+              <select id="setting-map-provider">
+                <option value="osm">🌐 OpenStreetMap / Lokaler Offline-Cache (Standard / Autark)</option>
+                <option value="google_roadmap">🗺️ Google Maps Straßenkarte (Roadmap)</option>
+                <option value="google_satellite">🛰️ Google Maps Satellit (Luftbilder)</option>
+                <option value="google_hybrid">🛰️ Google Maps Hybrid (Satellit + Straßen/Orte)</option>
+                <option value="google_terrain">⛰️ Google Maps Gelände (Topografie)</option>
+                <option value="mapbox">🗺️ Mapbox Satellit & Straßen</option>
+              </select>
+            </div>
+            <div class="form-group half">
+              <label>Google Maps / Mapbox API-Key (Optional):</label>
+              <input type="text" id="setting-map-api-key" placeholder="AIzaSy... oder pk.eyJ1..." autocomplete="off">
+            </div>
+          </div>
+          <p class="setting-desc" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
+            Tragen Sie hier Ihren Google Maps API-Key ein, um weltweite Satelliten- und Straßenkarten von Google Maps direkt auf der Lagekarte einzubinden. Ohne Key wird standardmäßig OpenStreetMap bzw. der lokale Kachelcache verwendet.
+          </p>
+
+          <!-- Sektion: Einsatzgebiet & Standard-Kartenzentrum -->
+          <h4 class="settings-section-title" style="margin-top:14px;">🎯 Einsatzgebiet & Standard-Kartenzentrum</h4>
+          <div class="form-row">
+            <div class="form-group full">
+              <label>Ort oder Adresse suchen (Zentrum setzen):</label>
+              <div class="settings-search-box">
+                <input type="text" id="setting-location-search" placeholder="z. B. Düsseldorf Hbf, Berlin oder 51.22, 6.78..." autocomplete="off">
+                <div id="setting-search-dropdown" class="map-search-dropdown" style="display:none;"></div>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group third">
+              <label>Zentrum Lat:</label>
+              <input type="number" step="any" id="setting-map-lat" placeholder="51.2277">
+            </div>
+            <div class="form-group third">
+              <label>Zentrum Lon:</label>
+              <input type="number" step="any" id="setting-map-lon" placeholder="6.7735">
+            </div>
+            <div class="form-group third">
+              <label>Standard Zoom (1-19):</label>
+              <input type="number" min="1" max="19" id="setting-map-zoom" placeholder="14">
+            </div>
+          </div>
+          <div style="margin-bottom: 14px;">
+            <button type="button" id="btn-use-current-map-view" class="btn btn-secondary">📌 Aktuelle Kartenansicht als Standard übernehmen</button>
+          </div>
+
+          <!-- Sektion: Hardware-Netzwerk-Adressen & Verbindung -->
+          <h4 class="settings-section-title" style="margin-top:14px;">🔌 Hardware-Netzwerk-Adressen (Repeater, USV, LTE-Router)</h4>
+          <div class="form-row">
+            <div class="form-group third">
+              <label>Hytera HR1065 IP:</label>
+              <input type="text" id="setting-hw-repeater-ip" placeholder="192.168.0.230">
+            </div>
+            <div class="form-group third">
+              <label>BlueWalker USV IP:</label>
+              <input type="text" id="setting-hw-usv-ip" placeholder="192.168.0.232">
+            </div>
+            <div class="form-group third">
+              <label>ZTE LTE-Router IP:</label>
+              <input type="text" id="setting-hw-router-ip" placeholder="192.168.0.1">
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:8px;margin-bottom:14px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="setting-hw-simulation">
+              <span>Schulungs-Simulation aktivieren (Nur für Demo/Schulung ohne echte Hardware)</span>
+            </label>
+          </div>
+
+          <button type="button" id="btn-save-map-settings" class="btn btn-action">💾 Alle Einstellungen speichern</button>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-settings-modal-close-btn" class="btn btn-primary">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 3: HARDWARE- & NOTSTROM-ÜBERWACHUNG ==================== -->
+  <div id="infra-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="infra-modal" class="tactical-modal infra-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">⚡ INFRASTRUKTUR- & NOTSTROM-ÜBERWACHUNG</h3>
+        <button id="btn-infra-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="infra-cards-grid">
+          <!-- Repeater -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">📡 HYTERA HR1065 REPEATER</span>
+              <span id="rpt-status-badge" class="badge-offline">OFFLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Kanal / Frequenz:</span><span id="rpt-channel" class="i-val bold">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Aktiver Zeitschlitz:</span><span id="rpt-slot" class="i-val mono">OFFLINE</span></div>
+              <div class="infra-row"><span class="i-lbl">PA-Temperatur:</span><span id="rpt-temp" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">VSWR (Stehwellenverhältnis):</span><span id="rpt-vswr" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Sendeleistung (Vorwärts):</span><span id="rpt-fwd-pwr" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Reflektierte Leistung:</span><span id="rpt-ref-pwr" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Betriebsspannung:</span><span id="rpt-volt" class="i-val">--</span></div>
+            </div>
+          </div>
+
+          <!-- USV -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">⚡ BLUEWALKER USV (NOTSTROM)</span>
+              <span id="usv-status-badge" class="badge-offline">OFFLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Batterieladung:</span><span id="usv-batt-pct" class="i-val bold">--</span></div>
+              <div class="battery-bar-wrap">
+                <div id="usv-battery-fill" class="battery-bar-fill" style="width: 0%;"></div>
+              </div>
+              <div class="infra-row"><span class="i-lbl">Autonomie / Restlaufzeit:</span><span id="usv-batt-min" class="i-val bold">-- Minuten</span></div>
+              <div class="infra-row"><span class="i-lbl">Eingang Spannung / Freq:</span><span id="usv-in-volt" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Ausgangsspannung:</span><span id="usv-out-volt" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">USV-Auslastung:</span><span id="usv-load" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Innentemperatur:</span><span id="usv-temp" class="i-val">--</span></div>
+            </div>
+          </div>
+
+          <!-- Router -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">📶 ROUTER & LTE (SPEEDBOX)</span>
+              <span id="router-status-badge" class="badge-offline">OFFLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Modell / IP:</span><span class="i-val mono">ZTE MF281 / 192.168.0.1</span></div>
+              <div class="infra-row"><span class="i-lbl">Provider:</span><span id="router-provider" class="i-val bold">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Signalstärke:</span><span id="router-signal-bars" class="i-val">Kein Signal</span></div>
+              <div class="infra-row"><span class="i-lbl">RSRP (Pegel):</span><span id="router-rsrp" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Internet-Latenz (Ping):</span><span id="router-ping" class="i-val">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Durchsatz:</span><span id="router-throughput" class="i-val">--</span></div>
+            </div>
+          </div>
+
+          <!-- Tailscale VPN -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">🌐 TAILSCALE VPN & FERNZUGRIFF</span>
+              <span id="vpn-status-badge" class="badge-offline">OFFLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Mesh-VPN Status:</span><span id="vpn-active-text" class="i-val bold">Nicht aktiv</span></div>
+              <div class="infra-row"><span class="i-lbl">VPN-IP (100.x.x.x):</span><span id="vpn-ip-val" class="i-val mono">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Externer Dashboard-Link:</span><span id="vpn-url-val" class="i-val"><a href="#" id="vpn-url-link" target="_blank" style="color:var(--accent-primary);text-decoration:underline;">--</a></span></div>
+              <div style="margin-top:8px;">
+                <button type="button" id="btn-copy-vpn-url" class="btn btn-secondary" style="width:100%;font-size:11px;padding:6px 10px;display:flex;align-items:center;justify-content:center;gap:6px;">
+                  <span>📋</span> <span id="btn-copy-vpn-label">VPN-URL KOPIEREN</span>
+                </button>
+              </div>
+              <div style="margin-top:10px;font-size:11px;line-height:1.4;color:var(--text-muted);background:rgba(255,255,255,0.03);padding:8px;border-radius:4px;border:1px dashed var(--border-color);">
+                <strong style="color:var(--text-main);">💡 Subnet-Routing (Omada & Repeater freigeben):</strong><br>
+                <code style="display:block;margin-top:3px;background:rgba(0,0,0,0.25);padding:2px 4px;border-radius:2px;font-family:monospace;color:#38bdf8;">tailscale up --advertise-routes=192.168.0.0/24</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dispatcher Verbindungs- & Port-Übersicht (aus Startup-Konsole) -->
+        <div class="infra-connection-summary" style="margin-top:16px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;padding:12px;">
+          <div style="font-weight:700;font-size:12px;color:var(--accent-primary);margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+            <span>📡</span> <span>DISPATCHER NETZWERK- & VERBINDUNGSINFORMATIONEN</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:12px;font-size:11px;">
+            <div>
+              <div style="color:var(--text-muted);font-weight:600;margin-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:2px;">🌐 Web-Zugriff & Dashboard</div>
+              <div class="infra-row"><span class="i-lbl">Lokal (Host):</span><span class="i-val mono">http://localhost:8000</span></div>
+              <div class="infra-row"><span class="i-lbl">Netzwerk (LAN):</span><span id="conn-info-lan" class="i-val mono">--</span></div>
+              <div class="infra-row"><span class="i-lbl">VPN (Tailscale):</span><span id="conn-info-vpn" class="i-val mono">--</span></div>
+              <div class="infra-row"><span class="i-lbl">Einsatzbericht:</span><span class="i-val mono">/report</span></div>
+            </div>
+            <div>
+              <div style="color:var(--text-muted);font-weight:600;margin-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:2px;">📻 DMR-Protokoll-Ports (HR1065)</div>
+              <div class="infra-row"><span class="i-lbl">GPS & Telemetrie:</span><span id="conn-info-gps-port" class="i-val mono">UDP 30003</span></div>
+              <div class="infra-row"><span class="i-lbl">Repeater Traps:</span><span class="i-val mono">UDP 10162</span></div>
+              <div class="infra-row"><span class="i-lbl">DMR-Dienste:</span><span class="i-val mono">UDP 30001 - 30014 (RRS, CC, Audio)</span></div>
+              <div class="infra-row"><span class="i-lbl">WebSocket Push:</span><span class="i-val mono">/ws/live</span></div>
+            </div>
+            <div>
+              <div style="color:var(--text-muted);font-weight:600;margin-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:2px;">⚙️ Hardware-Ziele</div>
+              <div class="infra-row"><span class="i-lbl">Hytera Repeater:</span><span id="conn-info-repeater" class="i-val mono">192.168.0.230</span></div>
+              <div class="infra-row"><span class="i-lbl">USV Notstrom:</span><span id="conn-info-usv" class="i-val mono">192.168.0.232:502</span></div>
+              <div class="infra-row"><span class="i-lbl">Router / Gateway:</span><span id="conn-info-router" class="i-val mono">192.168.0.1</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-infra-close-btn" class="btn btn-primary">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 4: MULTI-PLAN & KALIBRIERUNG ==================== -->
+  <div id="georef-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="georef-modal" class="tactical-modal georef-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">📐 LAGEPLÄNE VERWALTEN & GPS-VERANKERN</h3>
+        <button id="btn-georef-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="georef-modal-body">
+        <!-- 1. Neuer Plan Upload -->
+        <h4 class="modal-section-title">Neuen Plan hochladen (PDF, PNG, JPG)</h4>
+        <div class="form-row">
+          <div class="form-group half">
+            <label>Planname:</label>
+            <input type="text" id="input-plan-name" placeholder="z. B. Werkshalle Halle 3 EG">
+          </div>
+          <div class="form-group half">
+            <label>Stockwerk / Ebene:</label>
+            <select id="select-plan-floor">
+              <option value="Außen">Außengelände</option>
+              <option value="UG">Untergeschoss (UG)</option>
+              <option value="EG" selected>Erdgeschoss (EG)</option>
+              <option value="1. OG">1. Obergeschoss (1. OG)</option>
+              <option value="2. OG">2. Obergeschoss (2. OG)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="georef-dropzone" class="georef-dropzone">
+          <div class="dropzone-icon">📁</div>
+          <div class="dropzone-text">PDF oder Bild hierher ziehen oder klicken zum Auswählen</div>
+          <div class="dropzone-hint">PDFs werden automatisch in hochauflösende Rastergrafiken umgewandelt</div>
+          <input type="file" id="input-overlay-file" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none;">
+        </div>
+
+        <div id="upload-progress-wrap" class="upload-progress-hidden">
+          <div class="upload-spinner"></div>
+          <span id="upload-status-text">Lade Datei hoch...</span>
+        </div>
+
+        <!-- 2. Vorhandene Pläne Liste -->
+        <h4 class="modal-section-title" style="margin-top: 24px;">Hinterlegte Lagepläne & Stockwerke</h4>
+        <div id="plans-table-container">
+          <table class="modal-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Etage</th>
+                <th>Status</th>
+                <th>Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="tbl-saved-plans">
+              <tr><td colspan="4" style="text-align: center; color: #94a3b8;">Lade Pläne...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-georef-modal-cancel" class="btn">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 5: GEOFENCING & SICHERHEITSZONEN ==================== -->
+  <div id="geofence-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="geofence-modal" class="tactical-modal geofence-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">🛡️ GEOFENCING & SICHERHEITSZONEN</h3>
+        <button id="btn-geofence-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <form id="form-create-geofence">
+          <h4 class="modal-section-title">Neue Sicherheitszone definieren</h4>
+          <div class="form-row">
+            <div class="form-group half">
+              <label>Zonenname:</label>
+              <input type="text" id="input-gf-name" required placeholder="z. B. Gefahrenbereich Trümmerschatten">
+            </div>
+            <div class="form-group half">
+              <label>Zonentyp:</label>
+              <select id="select-gf-type" required>
+                <option value="danger">Gefahrenbereich (Alarm bei Zutritt)</option>
+                <option value="staging">Bereitstellungsraum (Sammelzone)</option>
+                <option value="perimeter">Absperrgrenze (Sperrzone)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group third">
+              <label>Mittelpunkt Lat:</label>
+              <input type="number" step="0.000001" id="input-gf-lat" required class="mono">
+            </div>
+            <div class="form-group third">
+              <label>Mittelpunkt Lon:</label>
+              <input type="number" step="0.000001" id="input-gf-lon" required class="mono">
+            </div>
+            <div class="form-group third">
+              <label>Radius (Meter):</label>
+              <input type="number" id="input-gf-radius" value="100" min="10" max="5000" required>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-cta btn-block">➕ ZONE ANLEGEN</button>
+        </form>
+
+        <h4 class="modal-section-title" style="margin-top: 24px;">Aktive Geofence-Zonen</h4>
+        <div id="geofences-table-container">
+          <table class="modal-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Typ</th>
+                <th>Radius</th>
+                <th>Aktion</th>
+              </tr>
+            </thead>
+            <tbody id="tbl-active-geofences">
+              <tr><td colspan="4" style="text-align: center; color: #94a3b8;">Keine Zonen aktiv</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-geofence-modal-cancel" class="btn">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 6: EINSATZ-STAMMDATEN & LAGE ==================== -->
+  <div id="mission-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="mission-modal" class="tactical-modal mission-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">📋 EINSATZ-STAMMDATEN & MISSIONS-MANAGER</h3>
+        <button id="btn-mission-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <form id="form-mission-data">
+          <div class="form-row">
+            <div class="form-group two-thirds">
+              <label>Einsatzstichwort / Titel:</label>
+              <input type="text" id="input-mission-title" required placeholder="z. B. Großbrand Industriehalle Ost">
+            </div>
+            <div class="form-group third">
+              <label>Einsatz-Nr. / Code:</label>
+              <input type="text" id="input-mission-code" required placeholder="z. B. E-2026-001" class="mono">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label>Einsatzstatus:</label>
+              <select id="select-mission-status">
+                <option value="preparation">🟡 Vorbereitung / Bereitstellung</option>
+                <option value="running" selected>🟢 Laufender Einsatz (Aktiv)</option>
+                <option value="finished">⚪ Beendet / Nachbereitung</option>
+              </select>
+            </div>
+            <div class="form-group half">
+              <label>Einsatzleiter / Funkführung:</label>
+              <input type="text" id="input-mission-leader" placeholder="z. B. ELW 1 / Leiter Florian 1">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label>Einsatzort / Adresse / Objekt:</label>
+              <input type="text" id="input-mission-location" placeholder="z. B. Rheinuferstr. 45, Werk 2">
+            </div>
+            <div class="form-group half">
+              <label>Funkkanal / Zeitschlitz / TG:</label>
+              <input type="text" id="input-mission-channel" placeholder="z. B. Hytera HR1065 (Kanal 1 / TG 101)">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Lagebeurteilung / Einsatzauftrag / Notizen:</label>
+            <textarea id="textarea-mission-notes" rows="4" placeholder="Aktuelle Lage, vorgehende Kräfte, Gefahrenschwerpunkte..."></textarea>
+          </div>
+
+          <div class="modal-info-box" style="margin-top:10px;font-size:12px;color:var(--text-muted);background:rgba(255,255,255,0.03);padding:10px;border-radius:6px;border:1px solid var(--border-subtle);">
+            ℹ️ Alle Einsatzdaten werden live an alle angeschlossenen Clients gesendet und fließen automatisch in den druckfähigen <strong>Einsatzbericht (/report)</strong> ein.
+          </div>
+
+          <div class="modal-actions-row" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
+            <button type="button" id="btn-close-mission-action" class="btn btn-danger" title="Einsatz auf 'Beendet' setzen">
+              ⏹️ EINSATZ BEENDEN
+            </button>
+            <div style="display:flex;gap:8px;">
+              <a href="/report" target="_blank" class="btn btn-secondary">
+                📄 BERICHT ÖFFNEN
+              </a>
+              <button type="submit" id="btn-save-mission" class="btn btn-cta">
+                💾 SPEICHERN & RUNDSENDEN
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-mission-modal-cancel" class="btn">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 7: FUNKGERÄTE- & FLOTTEN-VERWALTUNG ==================== -->
+  <div id="radios-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="radios-modal" class="tactical-modal radios-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">📻 FUNKGERÄTE- & FLOTTEN-VERWALTUNG</h3>
+        <button id="btn-radios-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Formular zum Anlegen / Bearbeiten -->
+        <form id="form-upsert-radio" class="radios-form-card">
+          <h4 id="radio-form-title" class="modal-section-title">Neues Funkgerät anlegen</h4>
+          <div class="form-row">
+            <div class="form-group quarter">
+              <label>DMR-ID (Funk-ID):</label>
+              <input type="number" id="input-rf-radio-id" required placeholder="z. B. 1005" class="mono">
+            </div>
+            <div class="form-group half">
+              <label>Rufname / Taktische Einheit:</label>
+              <input type="text" id="input-rf-alias" required placeholder="z. B. Trupp 2 / AGT (Florian 1-2)">
+            </div>
+            <div class="form-group quarter">
+              <label>Gerätemodell:</label>
+              <input type="text" id="input-rf-model" placeholder="z. B. HP785 / HM785">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group third">
+              <label>GPS-Modul vorhanden?</label>
+              <select id="select-rf-gps">
+                <option value="1" selected>🛰️ Ja (GPS-Tracking aktiv)</option>
+                <option value="0">📻 Nein (Kein GPS / Manuell)</option>
+              </select>
+            </div>
+            <div class="form-group third">
+              <label>Standard-Stockwerk:</label>
+              <select id="select-rf-floor">
+                <option value="Außen">Außengelände</option>
+                <option value="UG">Untergeschoss (UG)</option>
+                <option value="EG" selected>Erdgeschoss (EG)</option>
+                <option value="1. OG">1. Obergeschoss (1. OG)</option>
+                <option value="2. OG">2. Obergeschoss (2. OG)</option>
+              </select>
+            </div>
+            <div class="form-group third" style="display:flex;align-items:flex-end;gap:8px;">
+              <button type="submit" id="btn-submit-radio-form" class="btn btn-cta btn-block" style="height:36px;">
+                💾 GERÄT SPEICHERN
+              </button>
+              <button type="button" id="btn-reset-radio-form" class="btn btn-secondary" style="height:36px;display:none;">
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div class="modal-info-box" style="margin: 14px 0; font-size: 11px; color: var(--text-muted); background: rgba(56, 189, 248, 0.08); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #38bdf8;">
+          ⚡ <strong>Zwei-Wege-Synchronisation:</strong> Jede Änderung wird direkt in der SQLite-Datenbank persistiert und automatisch nach <code>ids.json</code> exportiert – auch kompatibel mit allen externen DMR-Tools und Skripten.
+        </div>
+
+        <!-- Geräteliste -->
+        <h4 class="modal-section-title">Registrierte Funkgeräte (<span id="radios-table-count">0</span>)</h4>
+        <div id="radios-table-container">
+          <table class="modal-table">
+            <thead>
+              <tr>
+                <th style="width: 70px;">DMR-ID</th>
+                <th>Rufname / Einheit</th>
+                <th style="width: 110px;">Modell</th>
+                <th style="width: 90px;">GPS</th>
+                <th style="width: 80px;">Etage</th>
+                <th style="width: 130px; text-align: right;">Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="tbl-radios-fleet">
+              <tr><td colspan="6" style="text-align: center; color: #94a3b8;">Lade Funkgeräte...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-radios-modal-cancel" class="btn">SCHLIESSEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lokale Scripts (Offline-fähig) -->
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/vendor/vis/vis-timeline-graph2d.min.js"></script>
+  
+  <!-- Haupt-Frontend-Logik -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

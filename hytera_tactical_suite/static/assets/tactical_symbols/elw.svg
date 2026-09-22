@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 80" width="48" height="38">
+  <rect x="5" y="15" width="90" height="55" rx="4" fill="#1e3a8a" stroke="#3b82f6" stroke-width="3"/>
+  <circle cx="25" cy="70" r="8" fill="#334155" stroke="#94a3b8" stroke-width="2"/>
+  <circle cx="75" cy="70" r="8" fill="#334155" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="50" y1="15" x2="50" y2="3" stroke="#ef4444" stroke-width="3"/>
+  <circle cx="50" cy="3" r="3" fill="#ef4444"/>
+  <text x="50" y="48" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">ELW</text>
+</svg>

@@ -1,0 +1,26 @@
+{
+  "1001": {
+    "name": "Mitarbeiter 1",
+    "geraet": "RT81 #1"
+  },
+  "1002": {
+    "name": "Mitarbeiter 2",
+    "geraet": "RT81 #2"
+  },
+  "1003": {
+    "name": "Mitarbeiter 3",
+    "geraet": "RT81 #3"
+  },
+  "9001": {
+    "name": "Einsatzleitung",
+    "geraet": "RT81 #4"
+  },
+  "9999": {
+    "name": "Dispatcher",
+    "geraet": "PC"
+  },
+  "1058": {
+    "name": "Willi",
+    "geraet": ""
+  }
+}

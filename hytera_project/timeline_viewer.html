@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<script>
+window.onerror = function(msg, url, lineNo, columnNo, error) {
+  document.body.innerHTML += '<div style="position:fixed;top:100px;left:50px;background:red;color:white;z-index:99999;padding:20px;font-size:24px;border:5px solid white;"><b>JAVASCRIPT ERROR:</b><br>' + msg + '<br>Line: ' + lineNo + '</div>';
+  return false;
+};
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Einsatz-Zeitstrahl – Live</title>
+<style>
+:root {
+  --bg:#0a0a0f; --panel:#0d0d1a; --border:#fce300;
+  --acc:#fce300; --acc2:#00fff7; --red:#ff003c;
+  --grn:#39ff14; --org:#ff6b00; --tx:#e8e8e8; --sub:#4a4a6a;
+  --ts1:#fce300; --ts2:#00fff7; --sms:#ff00ff; --gps:#00fff7;
+  --usv:#ff6b00; --call:#ff003c;
+}
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--tx);
+  font-family:'Share Tech Mono','Consolas',monospace;
+  display:flex;flex-direction:column;height:100vh;overflow:hidden;
+  background-image:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(252,227,0,0.012) 2px,rgba(252,227,0,0.012) 4px);
+}
+header{
+  background:var(--panel);border-bottom:2px solid var(--border);
+  padding:10px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0;
+  box-shadow:0 0 20px rgba(252,227,0,0.2);
+  clip-path:polygon(0 0,100% 0,100% calc(100% - 8px),calc(100% - 14px) 100%,0 100%);
+}
+header h1{font-size:14px;color:var(--acc);flex:1;text-shadow:0 0 14px rgba(252,227,0,0.8);letter-spacing:3px;text-transform:uppercase}
+#conn-dot{width:10px;height:10px;border-radius:50%;background:var(--sub);flex-shrink:0;transition:.3s}
+#conn-dot.live{background:var(--grn);box-shadow:0 0 8px var(--grn)}
+#conn-dot.err{background:var(--red);box-shadow:0 0 8px var(--red)}
+.toolbar{background:var(--panel);border-bottom:1px solid rgba(252,227,0,0.25);padding:6px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-shrink:0}
+.btn{
+  background:transparent;color:var(--acc);border:1px solid var(--acc);
+  padding:4px 12px;cursor:pointer;font-size:10px;font-family:inherit;
+  letter-spacing:1px;text-transform:uppercase;transition:.15s;
+  clip-path:polygon(0 0,calc(100% - 5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100% - 5px));
+}
+.btn:hover{background:var(--acc);color:#000;box-shadow:0 0 10px rgba(252,227,0,0.5)}
+.btn.active{background:var(--acc);color:#000}
+#zoom-lbl{color:var(--sub);font-size:10px;letter-spacing:1px}
+#main{display:flex;flex:1;overflow:hidden}
+#timeline-wrap{flex:1;overflow:auto;position:relative}
+canvas{display:block;cursor:crosshair}
+#sidebar{width:280px;background:var(--panel);border-left:1px solid rgba(252,227,0,0.25);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;transition:width 0.3s, min-width 0.3s;}
+#sidebar.collapsed{width:0;min-width:0;border-left:none;}
+.s-tabs { display:flex; background:#050508; border-bottom:1px solid rgba(252,227,0,0.25); flex-shrink:0; }
+.s-tab { flex:1; text-align:center; padding:10px 4px; font-size:10px; color:var(--sub); cursor:pointer; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid transparent; transition:0.2s; white-space:nowrap; }
+.s-tab:hover { color:var(--tx); background:rgba(252,227,0,0.05); }
+.s-tab.active { color:var(--acc); border-bottom:2px solid var(--acc); background:rgba(252,227,0,0.1); }
+.s-pane { display:none; flex:1; overflow-y:auto; flex-direction:column; }
+.s-pane.active { display:flex; }
+
+.top-tab-bar { display:flex; background:var(--panel); border-bottom:1px solid rgba(252,227,0,0.25); flex-wrap:wrap; }
+.top-tab { padding:6px 16px; font-size:10px; color:var(--sub); cursor:pointer; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(252,227,0,0.15); border-bottom:2px solid transparent; transition:0.2s; display:flex; align-items:center; gap:6px; }
+.top-tab:hover { background:rgba(252,227,0,0.05); color:var(--tx); }
+.top-tab.active { color:var(--acc); border-bottom:2px solid var(--acc); background:rgba(252,227,0,0.1); }
+.top-panel { display:none; background:#070710; border-bottom:1px solid #1a1a2e; }
+.top-panel.active { display:flex; }
+
+#detail-title{color:var(--acc);font-size:11px;font-weight:bold;padding:10px 12px 4px;border-bottom:1px solid rgba(252,227,0,0.25);text-shadow:0 0 8px rgba(252,227,0,0.5);letter-spacing:2px;text-transform:uppercase}
+#audio-player{margin-top:12px;padding:10px;background:#050508;border:1px solid rgba(252,227,0,0.4);clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,0 100%)}
+#audio-player audio{width:100%;height:32px;accent-color:var(--acc)}
+#audio-player .ap-label{font-size:10px;color:var(--sub);margin-bottom:6px;letter-spacing:1px}
+#audio-player .ap-warn{font-size:10px;color:var(--red);margin-top:4px;text-shadow:0 0 6px var(--red)}
+#detail-body{flex:1;overflow-y:auto;padding:10px 12px;font-size:11px;color:var(--sub);line-height:1.8}
+#eventfeed{flex:1;overflow-y:auto;}
+.feed-item{padding:4px 12px;border-bottom:1px solid rgba(252,227,0,0.05);font-size:10px;line-height:1.5;cursor:pointer;letter-spacing:.3px;transition:.1s}
+.feed-item:hover{background:rgba(252,227,0,0.06);border-left:2px solid var(--acc)}
+.feed-item .ft{color:var(--sub);margin-right:6px}
+.feed-call{color:var(--ts1)}
+.feed-usb{color:var(--red)}
+.feed-rrs{color:var(--grn)}
+.feed-sms{color:var(--sms)}
+.feed-gps{color:var(--gps)}
+.feed-usv{color:var(--usv)}
+.feed-note{color:var(--org)}
+#legend{display:flex;gap:12px;align-items:center;margin-left:auto;flex-wrap:wrap}
+.leg{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--sub);letter-spacing:.5px}
+.leg-dot{width:10px;height:10px}
+.fchk{display:flex;align-items:center;gap:4px;font-size:10px;cursor:pointer;color:var(--sub);letter-spacing:.5px}
+.fchk input{accent-color:var(--acc)}
+.dash-card{background:#0d0d1a;border:1px solid #1a1a2e;padding:8px 12px;border-radius:3px}
+.dash-title{font-size:9px;font-weight:bold;letter-spacing:2px;color:var(--sub);margin-bottom:6px;text-transform:uppercase}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:#050508}
+::-webkit-scrollbar-thumb{background:rgba(252,227,0,0.25)}
+
+@media (max-width: 800px) {
+  #main { flex-direction: column; }
+  #sidebar { width: 100%; border-left: none; border-top: 1px solid rgba(252,227,0,0.25); flex: 1; }
+  #sidebar.collapsed { height: 0; min-height: 0; border-top: none; width: 100%; }
+  #timeline-wrap { flex: 1; min-height: 50vh; }
+  .toolbar { gap: 4px; padding: 4px 8px; }
+  .btn { padding: 4px 8px; font-size: 9px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:20px">📡</span>
+  <h1 id="h-title">Einsatz-Zeitstrahl</h1>
+  <span id="conn-dot" title="Verbindung"></span>
+  <span id="h-time" style="font-size:12px;color:var(--sub)"></span>
+</header>
+
+<div class="toolbar">
+  <button class="btn" onclick="zoom(1.3)">+ Zoom</button>
+  <button class="btn" onclick="zoom(0.77)">− Zoom</button>
+  <button class="btn" onclick="resetZoom()">Reset</button>
+  <span id="zoom-lbl">100%</span>
+  <span style="flex:1"></span>
+  <button class="btn" id="btn-follow" onclick="toggleFollow()" title="Zeitzeiger verfolgen">📍 Folgen</button>
+  <button class="btn" id="btn-note" onclick="toggleNotePanel()" title="Notiz zum Einsatz hinzufuegen">📝 Notiz</button>
+  <button class="btn" id="btn-img" onclick="toggleImagePanel()" title="Bild zum Einsatz hinzufuegen">🖼 Bild</button>
+  <div id="legend">
+    <div class="leg"><div class="leg-dot" style="background:var(--ts1)"></div>Ruf/PTT</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--grn)"></div>Online</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--sms)"></div>SMS</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--gps)"></div>GPS</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--usv)"></div>USV</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--org)"></div>Notiz</div>
+    <div class="leg"><div class="leg-dot" style="background:#a855f7"></div>Bild</div>
+  </div>
+</div>
+
+<!-- Notiz-Panel -->
+<div id="note-panel" style="display:none;position:fixed;top:60px;left:50%;transform:translateX(-50%);
+  background:#0d0d1a;border:1px solid #fce300;padding:16px 20px;z-index:999;
+  min-width:320px;box-shadow:0 0 30px rgba(252,227,0,.25);border-radius:4px">
+  <div style="color:#fce300;font-size:11px;font-weight:bold;letter-spacing:2px;margin-bottom:10px">📝 NOTIZ HINZUFÜGEN</div>
+  <textarea id="note-text" rows="4" placeholder="Notiztext eingeben..."
+    style="width:100%;background:#050508;border:1px solid #3a3a5a;color:#e8e8e8;
+    padding:8px;font-family:Consolas;font-size:12px;resize:vertical;box-sizing:border-box"></textarea>
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn" onclick="submitNote()" style="flex:1">✓ Speichern</button>
+    <button class="btn" onclick="closeNotePanel()" style="color:#666;border-color:#666">✕ Abbrechen</button>
+  </div>
+  <div id="note-status" style="font-size:10px;color:#3a3a5a;margin-top:6px"></div>
+</div>
+
+<!-- Bild-Panel -->
+<div id="img-panel" style="display:none;position:fixed;top:60px;left:50%;transform:translateX(-50%);
+  background:#0d0d1a;border:1px solid #a855f7;padding:16px 20px;z-index:999;
+  min-width:340px;box-shadow:0 0 30px rgba(168,85,247,.25);border-radius:4px">
+  <div style="color:#a855f7;font-size:11px;font-weight:bold;letter-spacing:2px;margin-bottom:10px">🖼 BILD HINZUFÜGEN</div>
+  <div style="color:#3a3a5a;font-size:10px;margin-bottom:8px">Bild-Datei (JPG/PNG/GIF/WebP):</div>
+  <input type="file" id="img-file" accept="image/*"
+    style="color:#e8e8e8;font-size:11px;width:100%;margin-bottom:10px">
+  <input type="text" id="img-caption" placeholder="Bildunterschrift (optional)"
+    style="width:100%;background:#050508;border:1px solid #3a3a5a;color:#e8e8e8;
+    padding:6px 8px;font-family:Consolas;font-size:12px;box-sizing:border-box;margin-bottom:10px">
+  <div id="img-preview" style="max-height:150px;overflow:hidden;margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px">
+    <button class="btn" onclick="submitImage()" style="flex:1;border-color:#a855f7;color:#a855f7">⬆ Hochladen</button>
+    <button class="btn" onclick="closeImagePanel()" style="color:#666;border-color:#666">✕ Abbrechen</button>
+  </div>
+  <div id="img-status" style="font-size:10px;color:#3a3a5a;margin-top:6px"></div>
+</div>
+
+
+<div class="top-tab-bar">
+  <div class="top-tab active" id="tabbtn-dash" onclick="toggleTopTab('dash')">📊 System-Dashboard</div>
+  <div class="top-tab" id="tabbtn-filter" onclick="toggleTopTab('filter')">⚙️ Ansichts-Filter</div>
+  <div style="flex:1"></div>
+  <div class="top-tab" style="border-right:none; border-left:1px solid rgba(252,227,0,0.15); color:var(--acc);" onclick="toggleSidebar()" id="tabbtn-sidebar">▶ Seitenleiste</div>
+</div>
+
+<div id="panel-filter" class="top-panel" style="gap:6px; padding:5px 12px; flex-wrap:wrap;">
+  <label class="fchk"><input type="checkbox" id="f-call" checked onchange="draw()"> Rufe</label>
+  <label class="fchk"><input type="checkbox" id="f-rrs" checked onchange="draw()"> Online/Offline</label>
+  <label class="fchk"><input type="checkbox" id="f-sms" checked onchange="draw()"> SMS</label>
+  <label class="fchk"><input type="checkbox" id="f-gps" checked onchange="draw()"> GPS</label>
+  <label class="fchk"><input type="checkbox" id="f-usv" checked onchange="draw()"> USV</label>
+  <label class="fchk"><input type="checkbox" id="f-note" checked onchange="draw()"> Notizen</label>
+  <label class="fchk"><input type="checkbox" id="f-image" checked onchange="draw()"> Bilder</label>
+</div>
+
+<!-- ── System-Dashboard ─────────────────────────────────── -->
+<div id="panel-dash" class="top-panel active" style="flex-wrap:wrap; gap:8px; padding:6px 10px; align-items:stretch">
+  <!-- USV-Block -->
+  <div class="dash-card" id="dash-usv" style="min-width:260px;flex:1">
+    <div class="dash-title">⚡ BlueWalker USV</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <!-- Batterie-Gauge -->
+      <div style="text-align:center">
+        <svg width="64" height="64" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r="26" fill="none" stroke="#1a1a2e" stroke-width="7"/>
+          <circle id="g-batt-arc" cx="32" cy="32" r="26" fill="none" stroke="#39ff14"
+            stroke-width="7" stroke-dasharray="0 164" stroke-dashoffset="41"
+            stroke-linecap="round" transform="rotate(-90 32 32)" style="transition:stroke-dasharray .5s"/>
+          <text x="32" y="36" text-anchor="middle" fill="#e8e8e8"
+            font-size="13" font-family="Consolas" id="g-batt-txt">–%</text>
+        </svg>
+        <div style="font-size:9px;color:#3a3a5a;margin-top:2px">BATTERIE</div>
+      </div>
+      <!-- Last-Gauge -->
+      <div style="text-align:center">
+        <svg width="64" height="64" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r="26" fill="none" stroke="#1a1a2e" stroke-width="7"/>
+          <circle id="g-last-arc" cx="32" cy="32" r="26" fill="none" stroke="#fce300"
+            stroke-width="7" stroke-dasharray="0 164" stroke-dashoffset="41"
+            stroke-linecap="round" transform="rotate(-90 32 32)" style="transition:stroke-dasharray .5s"/>
+          <text x="32" y="36" text-anchor="middle" fill="#e8e8e8"
+            font-size="13" font-family="Consolas" id="g-last-txt">–%</text>
+        </svg>
+        <div style="font-size:9px;color:#3a3a5a;margin-top:2px">LAST</div>
+      </div>
+      <!-- Textwerte -->
+      <div style="font-size:10px;line-height:2;color:#e8e8e8;font-family:Consolas">
+        <div>🔋 Laufzeit: <span id="d-batt-min" style="color:#39ff14">–</span> min</div>
+        <div>🌡 Temp:     <span id="d-temp"     style="color:#fce300">–</span> °C</div>
+        <div>🔌 Eingang:  <span id="d-ein"      style="color:#a0a0c0">–</span> V</div>
+        <div>💡 Ausgang:  <span id="d-aus"      style="color:#a0a0c0">–</span> V</div>
+        <div>📊 Status:   <span id="d-netz"     style="color:#39ff14">–</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Router-Block -->
+  <div class="dash-card" style="min-width:260px;flex:1">
+    <div class="dash-title">🌐 TP-Link Router</div>
+    <div style="font-size:10px;line-height:2;color:#e8e8e8;font-family:Consolas">
+      <div style="display:flex; justify-content:space-between;">
+        <span>Name: <span id="d-router-name" style="color:#ff6b00">–</span></span>
+        <span>Uptime: <span id="d-router-uptime" style="color:#e8e8e8">–</span></span>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span>Status: <span id="d-router-status" style="color:#39ff14">–</span></span>
+        <span>CPU: <span id="d-router-cpu" style="color:#00fff7">–</span></span>
+      </div>
+      <div style="display:flex; justify-content:space-between;">
+        <span>Download: <span id="d-router-rx" style="color:#a0a0c0">–</span></span>
+        <span>Upload: <span id="d-router-tx" style="color:#a0a0c0">–</span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Repeater-Block -->
+  <div class="dash-card" style="min-width:160px;flex:0 0 auto">
+    <div class="dash-title">📡 HR1065 Repeater</div>
+    <div style="font-size:10px;line-height:2;font-family:Consolas;color:#e8e8e8">
+      <div>Status:  <span id="d-rep-online" style="color:#3a3a5a">–</span></div>
+      <div>HB vor:  <span id="d-rep-age"    style="color:#3a3a5a">–</span></div>
+      <div>IP:      <span id="d-rep-ip"     style="color:#3a3a5a">–</span></div>
+    </div>
+  </div>
+
+  <!-- Einsatz-Block -->
+  <div class="dash-card" style="min-width:160px;flex:0 0 auto">
+    <div class="dash-title">🎙 Einsatz</div>
+    <div style="font-size:10px;line-height:2;font-family:Consolas;color:#e8e8e8">
+      <div>Name:    <span id="d-mis-name"   style="color:#fce300;max-width:120px;overflow:hidden;display:inline-block;vertical-align:bottom;text-overflow:ellipsis;white-space:nowrap">–</span></div>
+      <div>Events:  <span id="d-mis-evts"   style="color:#a0a0c0">0</span></div>
+      <div>Aktiv:   <span id="d-mis-ptts"   style="color:#3a3a5a">–</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="timeline-wrap"><canvas id="tl"></canvas></div>
+  <div id="sidebar">
+    <div class="s-tabs">
+      <div class="s-tab active" id="sbtn-feed" onclick="switchSidebarTab('feed')">📋 Live-Feed</div>
+      <div class="s-tab" id="sbtn-details" onclick="switchSidebarTab('details')">ℹ️ Details</div>
+    </div>
+    <div id="spane-feed" class="s-pane active">
+      <div id="eventfeed"></div>
+    </div>
+    <div id="spane-details" class="s-pane">
+      <div id="detail-title">Ereignis-Details</div>
+      <div id="detail-body">
+        <div style="color:#3a3a5a;font-size:10px;line-height:1.8;padding:4px 0">
+          📻 <strong style="color:#fce300">PTT-Balken</strong> anklicken<br>→ Audio abspielen
+          <br><br>
+          🟢 <strong style="color:#39ff14">Punkt</strong> = Online/Offline
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+const SSE_URL = BASE + '/events';
+const STATE_URL = BASE + '/state';
+
+let EVENTS   = [];
+let IDS_MAP  = {};
+let RADIOS   = [];
+let MISSION  = { name: '', start: 0, active: false };
+let hitTargets = [];
+let pxPerSec = 80;
+
+// ── SSE Verbindung ─────────────────────────────────────────
+let es = null;
+
+function connect() {
+  if (es) { es.close(); }
+  const dot = document.getElementById('conn-dot');
+  dot.className = '';
+
+  // Erst State laden (alle bisherigen Events)
+  fetch(STATE_URL).then(r => r.json()).then(data => {
+    MISSION.name   = data.name;
+    MISSION.start  = parseFloat(data.start);
+    MISSION.active = data.active;
+    IDS_MAP        = data.ids || {};
+    EVENTS         = data.events || [];
+    rebuildRadios();
+    document.getElementById('h-title').textContent =
+      'Einsatz: ' + (MISSION.name || '–');
+    draw();
+  }).catch(() => {});
+
+  // Dann SSE für Live-Updates
+  es = new EventSource(SSE_URL);
+  es.onopen = () => { dot.className = 'live'; };
+  es.onerror = () => { dot.className = 'err'; setTimeout(connect, 3000); };
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === '__init__') {
+      MISSION.name   = ev.name;
+      MISSION.start  = parseFloat(ev.start);
+      MISSION.active = ev.active !== false;
+      EVENTS         = ev.events || [];
+      document.getElementById('h-title').textContent =
+        'Einsatz: ' + (MISSION.name || '–');
+      const feed = document.getElementById('eventfeed');
+      if (feed) {
+        feed.innerHTML = '';
+        EVENTS.forEach(e => addFeedItem(e));
+      }
+    } else if (ev.type === '__ids_update__') {
+      // ── Echtzeit-Namensupdate vom Python-Backend ──────────────────
+      // Wird ausgelöst wenn IDs im Einstellungs-Tab gespeichert werden.
+      // Kein Reload, kein Reconnect – Canvas und Feed werden sofort neu gerendert.
+      IDS_MAP = ev.ids || {};
+      // Canvas neu zeichnen (Zeitstrahl-Zeilenbeschriftungen + PTT-Blöcke)
+      draw();
+      // Live-Feed komplett neu aufbauen – alle bisherigen Einträge zeigen neue Namen
+      const feed = document.getElementById('eventfeed');
+      if (feed) {
+        feed.innerHTML = '';
+        // Feed in umgekehrter Reihenfolge neu befüllen (neueste oben, wie addFeedItem es tut)
+        [...EVENTS].reverse().forEach(e => {
+          const d = document.createElement('div');
+          const cls = feedClass(e.type);
+          d.className = 'feed-item ' + cls;
+          const timeStr = MISSION.start
+            ? new Date((MISSION.start + e.rel)*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+            : formatRel(e.rel);
+          d.innerHTML = `<span class="ft">${timeStr}</span>${feedLabel(e)}`;
+          d.onclick = () => showDetail(e);
+          feed.appendChild(d);
+        });
+      }
+    } else {
+      EVENTS.push(ev);
+      addFeedItem(ev);
+    }
+    rebuildRadios();
+    draw();
+    updateClock();
+  };
+}
+
+// Standalone-Modus (direkt aus Datei geöffnet, kein Server)
+function tryStandalone() {
+  if (typeof STANDALONE_DATA !== 'undefined') {
+    EVENTS   = STANDALONE_DATA.events || [];
+    IDS_MAP  = STANDALONE_DATA.ids    || {};
+    const stSec = STANDALONE_DATA.start ? new Date(STANDALONE_DATA.start).getTime() / 1000 : 0;
+    MISSION  = { name: STANDALONE_DATA.name || '', start: stSec, active: false };
+    rebuildRadios();
+    const feed = document.getElementById('eventfeed');
+    if (feed) {
+      feed.innerHTML = '';
+      EVENTS.forEach(e => addFeedItem(e));
+    }
+    draw();
+    document.getElementById('h-title').textContent =
+      'Einsatz: ' + MISSION.name;
+    const connDot = document.getElementById('conn-dot');
+    if (connDot) connDot.title = 'Offline-Ansicht';
+  }
+}
+
+// Verbindungsversuch, falle auf Standalone zurück
+fetch(STATE_URL, { signal: AbortSignal.timeout(1500) })
+  .then(() => connect())
+  .catch(() => { tryStandalone(); });
+
+// ── Live-Feed ──────────────────────────────────────────────
+function addFeedItem(ev) {
+  const feed = document.getElementById('eventfeed');
+  const d = document.createElement('div');
+  const cls = feedClass(ev.type);
+  d.className = 'feed-item ' + cls;
+  // Echtzeit-Uhrzeit im Feed
+  const timeStr = MISSION.start
+    ? new Date((MISSION.start + ev.rel)*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+    : formatRel(ev.rel);
+  d.innerHTML = `<span class="ft">${timeStr}</span>${feedLabel(ev)}`;
+  d.onclick = () => showDetail(ev);
+  feed.insertBefore(d, feed.firstChild);
+  if (feed.children.length > 200) feed.removeChild(feed.lastChild);
+}
+
+function feedClass(t) {
+  if (t.startsWith('call_') || t.startsWith('ptt')) return 'feed-call';
+  if (t==='online'||t==='offline') return 'feed-rrs';
+  if (t==='sms') return 'feed-sms';
+  if (t==='gps') return 'feed-gps';
+  if (t==='usv') return 'feed-usv';
+  return 'feed-note';
+}
+
+function feedLabel(ev) {
+  const id = r => r === 999999 ? 'LOKAL (USB)' : (IDS_MAP[String(r)] ? (IDS_MAP[String(r)].name || ('ID ' + r)) : ('ID ' + r));
+  switch(ev.type) {
+    case 'ptt_start':   return ev.slot === 'USB' ? `<span class="feed-usb">🎙 USB-Aufnahme läuft...</span>` : `📻 ${ev.slot} Ruf: ${id(ev.radio_id)}`;
+    case 'ptt_end':     return ev.slot === 'USB' ? `<span class="feed-usb">🎙 USB-Aufnahme (${ev.duration}s)</span>` : `📻 ${ev.slot} Ende (${ev.duration}s)`;
+    case 'call_start':  return `📡 ${ev.slot} ${ev.call_type}: ${id(ev.radio_id)} → ${id(ev.target_id)}`;
+    case 'call_end':    return `📡 ${ev.slot} Ende`;
+    case 'online':      return `🟢 ${id(ev.radio_id)} online`;
+    case 'offline':     return `🔴 ${id(ev.radio_id)} offline`;
+    case 'sms':         return `💬 ${id(ev.sender_id)}: ${(ev.text||'').substring(0,30)}`;
+    case 'gps':         return `📍 ${id(ev.radio_id)} ${(ev.lat||0).toFixed(4)},${(ev.lon||0).toFixed(4)}`;
+    case 'usv':         return `⚡ USV ${ev.batt_pct}% – ${ev.batt_status}`;
+    case 'note':        return `📝 ${ev.text||''}`;
+    case 'image':       return `🖼 ${ev.caption||ev.filename}`;
+    default:            return ev.type;
+  }
+}
+
+function showDetail(ev) {
+  document.getElementById('detail-title').textContent = feedLabel(ev);
+  let html = `<table style="width:100%;border-collapse:collapse">`;
+  for (const [k,v] of Object.entries(ev)) {
+    if (k==='type') continue;
+    const disp = (k==='rel'||k==='start') ? absTime(parseFloat(v)||0) + ` (${v}s)` : v;
+    html += `<tr><td style="color:var(--sub);padding:2px 6px 2px 0;white-space:nowrap">${k}</td>
+                 <td style="word-break:break-all">${disp}</td></tr>`;
+  }
+  html += '</table>';
+
+
+  // ── Audio-Player ──────────────────────────────────────────────
+  let audioHtml = '';
+  if (ev.slot) {
+    let byteOff = null, byteCount = null, startRel = null;
+
+    if (ev.type === 'ptt_start' || ev.type === 'call_start') {
+      // Werte aus drawEvents (Canvas-Rendering) bevorzugen
+      if (ev._byteCount > 0) {
+        byteOff   = ev.byte_offset ?? ev._byteOff ?? 0;
+        byteCount = ev._byteCount;
+        startRel  = ev.rel;
+      } else {
+        // Fallback: passendes ptt_end im EVENTS-Array suchen
+        const rid = ev.radio_id ?? ev.sender_id;
+        const endEv = EVENTS.find(e =>
+          (e.type === 'ptt_end' || e.type === 'call_end') &&
+          (e.radio_id === rid || e.sender_id === rid) &&
+          e.slot === ev.slot &&
+          e.rel > ev.rel
+        );
+        if (endEv && endEv.byte_count > 0) {
+          byteOff   = ev.byte_offset ?? 0;
+          byteCount = endEv.byte_count;
+          startRel  = ev.rel;
+        } else if (!endEv) {
+          // Noch aktiv
+          audioHtml = `<div id="audio-player">
+            <div class="ap-warn">🔴 Übertragung läuft – nach Ende klicken zum Abhören</div>
+          </div>`;
+        }
+      }
+    } else if (ev.type === 'ptt_end' || ev.type === 'call_end') {
+      if (ev.byte_count > 0) {
+        // Passendes ptt_start für byte_offset suchen
+        const rid = ev.radio_id ?? ev.sender_id;
+        const startEv = [...EVENTS].reverse().find(e =>
+          (e.type === 'ptt_start' || e.type === 'call_start') &&
+          (e.radio_id === rid || e.sender_id === rid) &&
+          e.slot === ev.slot &&
+          e.rel < ev.rel
+        );
+        byteOff   = startEv ? (startEv.byte_offset ?? 0) : (ev._byteOff ?? 0);
+        byteCount = ev.byte_count;
+        startRel  = ev.rel - (ev.duration || 0);
+      }
+    }
+
+    if (ev._audio_file) {
+      // Offline-Modus: exportierte WAV-Datei
+      const tstr = absTime(startRel || ev.rel);
+      audioHtml  = `<div id="audio-player">
+        <div class="ap-label">🎙 ${ev.slot} – ${tstr}</div>
+        <audio controls src="${ev._audio_file}"></audio>
+      </div>`;
+    } else if (byteOff !== null && byteCount > 0) {
+      // Live-Modus: Audio via Endpoint anfordern
+      const src  = `${BASE}/audio/${ev.slot}/${Math.round(byteOff)}/${Math.round(byteCount)}`;
+      const tstr = absTime(startRel);
+      audioHtml  = `<div id="audio-player">
+        <div class="ap-label">🎙 ${ev.slot} – ${tstr} (${(byteCount/8000).toFixed(1)}s)</div>
+        <audio controls src="${src}"></audio>
+      </div>`;
+    }
+  }
+
+  // ── Bild-Anzeige ─────────────────────────────────────────
+  let imageHtml = '';
+  if (ev.type === 'image' && ev.filename) {
+    const isOffline = typeof STANDALONE_DATA !== 'undefined';
+    const src = isOffline ? ev.filename : `${BASE}/img/${ev.filename}`;
+    imageHtml = `<div style="margin-top:12px">
+      <img src="${src}" style="max-width:100%;border:1px solid #a855f7;border-radius:3px"
+           onerror="this.style.display='none'">
+      ${ev.caption ? `<div style="color:#a855f7;font-size:10px;margin-top:4px">${ev.caption}</div>` : ''}
+    </div>`;
+  }
+
+  document.getElementById('detail-body').innerHTML = html + audioHtml + imageHtml;
+  switchSidebarTab('details');
+}
+
+// ── Radios ─────────────────────────────────────────────────
+function rebuildRadios() {
+  const seen = new Set();
+  EVENTS.forEach(e => {
+    if (e.radio_id != null) seen.add(e.radio_id);
+    if (e.sender_id != null) seen.add(e.sender_id);
+  });
+  RADIOS = [...seen].sort((a,b) => a - b);
+}
+
+function resolveId(id, ev) {
+  if (id === 999999) return (ev && ev.name) ? '🎙 ' + ev.name : '🎙 LOKAL (USB)';
+  const e = IDS_MAP[String(id)];
+  return e ? (e.name + (e.geraet ? ' ['+e.geraet+']' : '')) : 'ID ' + id;
+}
+
+// ── Uhr ────────────────────────────────────────────────────
+function updateClock() {
+  if (!MISSION.start) return;
+  const el = document.getElementById('h-time');
+  const sec = MISSION.active ? (Date.now()/1000 - MISSION.start) : 0;
+  if (sec > 0) el.textContent = '⏱ ' + formatRel(sec);
+}
+setInterval(updateClock, 1000);
+
+// ── Zeichnen ───────────────────────────────────────────────
+const ROW_H   = 52;
+const HDR_H   = 36;
+const TICK_H  = 24;
+const LABEL_W = 170;
+
+function maxTime() {
+  let m = 30;
+  EVENTS.forEach(e => { if (e.rel > m) m = e.rel; });
+  if (MISSION.active && MISSION.start)
+    m = Math.max(m, Date.now()/1000 - MISSION.start + 10);
+  return m + 10;
+}
+
+function draw() {
+  const cv = document.getElementById('tl');
+  let W = LABEL_W + Math.ceil(maxTime() * pxPerSec) + 60;
+  
+  // Verhindere Absturz des Browsers bei zu langem Einsatz (Max Texture Size)
+  if (W > 16000) {
+    W = 16000;
+    pxPerSec = (W - LABEL_W - 60) / maxTime();
+    const zLbl = document.getElementById('zoom-lbl');
+    if (zLbl) zLbl.textContent = Math.round(pxPerSec/80*100)+'% (MAX)';
+  }
+  
+  const H = HDR_H + TICK_H + Math.max(1, RADIOS.length) * ROW_H + 80;
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  hitTargets = [];
+
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0,0,W,H);
+
+  drawTimeAxis(ctx, W, H);
+  drawRows(ctx, W, H);
+  drawEvents(ctx);
+
+  // Echtzeit-Linie (gelb-neon)
+  if (MISSION.active && MISSION.start) {
+    const nowRel = Date.now()/1000 - MISSION.start;
+    const x = LABEL_W + nowRel * pxPerSec;
+    ctx.strokeStyle = 'rgba(252,227,0,0.85)'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([4,3]);
+    ctx.shadowColor = '#fce300'; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.moveTo(x, HDR_H); ctx.lineTo(x, H); ctx.stroke();
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
+  }
+}
+
+function drawRows(ctx, W, H) {
+  RADIOS.forEach((rid, i) => {
+    const y = HDR_H + TICK_H + i * ROW_H;
+    ctx.fillStyle = i%2===0 ? '#0d0d1a' : '#0a0a0f';
+    ctx.fillRect(LABEL_W, y, W-LABEL_W, ROW_H);
+    ctx.strokeStyle='rgba(252,227,0,0.12)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,y+ROW_H); ctx.lineTo(W,y+ROW_H); ctx.stroke();
+    ctx.fillStyle='#fce300'; ctx.font='11px Consolas'; ctx.textBaseline='middle';
+    ctx.shadowColor='#fce300'; ctx.shadowBlur=4;
+    ctx.fillText(resolveId(rid), 8, y+ROW_H/2);
+    ctx.shadowBlur=0;
+  });
+  ctx.strokeStyle='rgba(252,227,0,0.3)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(LABEL_W,0); ctx.lineTo(LABEL_W,H); ctx.stroke();
+}
+
+const C = {
+  ts1: '#fce300', ts2: '#00fff7', grn: '#39ff14', red: '#ff003c',
+  gps: '#00fff7', usv: '#ff6b00', sms: '#ff00ff', org: '#ff6b00',
+  sub: '#3a3a5a', tx:  '#e8e8e8', bg: '#0a0a0f', panel: '#0d0d1a',
+  border: 'rgba(252,227,0,0.2)',
+};
+
+// RSSI-Ampelfarbe
+function rssiColor(dbm) {
+  if (dbm == null) return '#757575';
+  if (dbm >= -70)  return '#a6e3a1';  // gruen
+  if (dbm >= -80)  return '#f9e2af';  // gelb
+  if (dbm >= -90)  return '#fab387';  // orange
+  return '#f38ba8';                    // rot
+}
+function rssiLabel(dbm) {
+  if (dbm == null) return '';
+  if (dbm >= -70)  return `${dbm} dBm ●`;
+  if (dbm >= -80)  return `${dbm} dBm ◑`;
+  if (dbm >= -90)  return `${dbm} dBm ○`;
+  return `${dbm} dBm ⚠`;
+}
+
+function drawEvents(ctx) {
+  try {
+  const showCall = document.getElementById('f-call').checked;
+  const showRRS  = document.getElementById('f-rrs').checked;
+  const showSMS  = document.getElementById('f-sms').checked;
+  const showGPS  = document.getElementById('f-gps').checked;
+  const showUSV  = document.getElementById('f-usv').checked;
+  const showNote = document.getElementById('f-note').checked;
+
+  const pttOpen = {};
+
+  EVENTS.forEach(ev => {
+    const ri  = RADIOS.indexOf(ev.radio_id ?? ev.sender_id);
+    const y   = HDR_H + TICK_H + (ri >= 0 ? ri : 0) * ROW_H;
+    const x   = LABEL_W + ev.rel * pxPerSec;
+    const bh  = ROW_H * 0.5;
+    const by  = y + (ROW_H - bh) / 2;
+
+    switch (ev.type) {
+      case 'ptt_start': case 'call_start': {
+        if (!showCall) break;
+        const col = ev.slot === 'TS2' ? C.ts2 : (ev.slot === 'USB' ? C.red : C.ts1);
+        pttOpen[(ev.radio_id??ev.sender_id) + '_' + ev.slot] = { x, y, by, bh, col, ev };
+        break;
+      }
+      case 'ptt_end': case 'call_end': {
+        if (!showCall) break;
+        const rid = ev.radio_id ?? ev.sender_id;
+        const key = rid + '_' + ev.slot;
+        const st  = pttOpen[key];
+        if (st) {
+          const x2   = LABEL_W + ev.rel * pxPerSec;
+          let w      = Math.max(x2 - st.x, 4);
+          w = Math.min(w, 2000); // Prevent Chromium roundRect bug
+          const rssi = st.ev.rssi ?? null;
+          const rCol = rssiColor(rssi);
+          const bCol = st.col;  // Slot-Farbe fuer Hauptfuellung
+
+          // Hauptblock
+          ctx.fillStyle = (bCol === C.red) ? 'rgba(255,0,60,0.6)' : (bCol === C.ts2 ? 'rgba(0,255,247,0.6)' : 'rgba(252,227,0,0.6)');
+          ctx.beginPath(); ctx.roundRect(st.x, st.by, w, st.bh, 4); ctx.fill();
+
+          // RSSI-Farbstreifen unten (4px hoher Balken)
+          ctx.fillStyle = rCol;
+          ctx.fillRect(st.x, st.by + st.bh - 4, w, 4);
+
+          // Rahmen in RSSI-Farbe
+          ctx.strokeStyle = rCol; ctx.lineWidth = 1.8;
+          ctx.beginPath(); ctx.roundRect(st.x, st.by, w, st.bh, 4); ctx.stroke();
+
+          if (w > 40) {
+            ctx.save();
+            ctx.beginPath(); ctx.rect(st.x, st.by, w, st.bh); ctx.clip();
+            // Name
+            ctx.fillStyle = '#000'; ctx.font = 'bold 10px Segoe UI';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(resolveId(rid, st.ev), st.x+5, st.by + st.bh/2 - 5);
+            // RSSI
+            if (rssi != null && w > 70) {
+              ctx.fillStyle = '#111'; ctx.font = '9px Segoe UI';
+              ctx.fillText(rssiLabel(rssi), st.x+5, st.by + st.bh/2 + 6);
+            }
+            ctx.restore();
+          }
+          // Byte-Offset und Count für Audio-Player setzen
+          st.ev._byteOff   = st.ev.byte_offset ?? 0;
+          st.ev._byteCount = ev.byte_count ?? 0;
+          hitTargets.push({ x:st.x, y:st.by, w, h:st.bh, ev: st.ev, label: feedLabel(st.ev) });
+          delete pttOpen[key];
+        }
+        break;
+      }
+      case 'online': case 'offline': {
+        if (!showRRS) break;
+        _dot(ctx, x, y+ROW_H/2, 6, ev.type==='online' ? C.grn : C.red, ev);
+        break;
+      }
+      case 'sms': {
+        if (!showSMS) break;
+        _stripe(ctx, x, C.sms, ev);
+        break;
+      }
+      case 'gps': {
+        if (!showGPS) break;
+        _dot(ctx, x, y+ROW_H*0.75, 3, C.gps, ev);
+        break;
+      }
+      case 'usv': {
+        if (!showUSV) break;
+        _stripe(ctx, x, C.usv, ev);
+        break;
+      }
+      case 'note': {
+        if (!showNote) break;
+        _stripe(ctx, x, C.org, ev);
+        break;
+      }
+      case 'image': {
+        const showImg = document.getElementById('f-image')?.checked ?? true;
+        if (!showImg) break;
+        _stripe(ctx, x, '#a855f7', ev);
+        break;
+      }
+    }
+  });
+
+  // Laufende PTTs (noch kein ptt_end) als wachsenden Block zeichnen
+  if (showCall && MISSION.active && MISSION.start) {
+    const nowRel = Date.now()/1000 - MISSION.start;
+    // PTTs die aelter als 30s sind und kein ptt_end haben = Daten-Verlust, nicht als "aktiv" zeigen
+    const MAX_OPEN_AGE = 30;  // Sekunden
+    for (const [key, st] of Object.entries(pttOpen)) {
+      const pttAge = nowRel - st.ev.rel;  // Sekunden seit ptt_start
+      if (pttAge > MAX_OPEN_AGE) {
+        // Phantom-PTT: als abgeschlossen zeichnen (grau, keine Pulsierung)
+        const w = Math.max(Math.min(pttAge, 60) * pxPerSec, 8);
+        ctx.fillStyle = 'rgba(90,90,110,0.35)';
+        ctx.beginPath(); ctx.roundRect(st.x, st.by, w, st.bh, 4); ctx.fill();
+        ctx.strokeStyle = 'rgba(90,90,110,0.6)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.roundRect(st.x, st.by, w, st.bh, 4); ctx.stroke();
+        if (w > 30) {
+          const rid = st.ev.radio_id ?? st.ev.sender_id;
+          ctx.fillStyle = '#888'; ctx.font = '9px Segoe UI';
+          ctx.textBaseline = 'middle'; ctx.save();
+          ctx.beginPath(); ctx.rect(st.x, st.by, w, st.bh); ctx.clip();
+          ctx.fillText('? ' + resolveId(rid, st.ev), st.x+5, st.by+st.bh/2); ctx.restore();
+        }
+        continue;  // nicht als klickbares Hit-Target eintragen
+      }
+      const x2 = LABEL_W + nowRel * pxPerSec;
+      let w    = Math.max(x2 - st.x, 8);
+      w = Math.min(w, 8000); // Max width to prevent Chromium crash // Prevent Chromium roundRect bug
+      // Pulsierend via Alpha-Variation
+      const pulse = 0.5 + 0.35 * Math.sin(Date.now() / 200);
+      ctx.fillStyle = st.col;
+      ctx.globalAlpha = pulse;
+      ctx.beginPath(); ctx.roundRect(st.x, st.by, w, st.bh, 4); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = st.col; ctx.lineWidth = 2; ctx.stroke();
+      // Label
+      if (w > 30) {
+        const rid = st.ev.radio_id ?? st.ev.sender_id;
+        ctx.fillStyle = '#000'; ctx.font = 'bold 10px Segoe UI';
+        ctx.textBaseline = 'middle'; ctx.save();
+        ctx.beginPath(); ctx.rect(st.x, st.by, w, st.bh); ctx.clip();
+        ctx.fillText('🔴 ' + resolveId(rid, st.ev), st.x+5, st.by+st.bh/2); ctx.restore();
+      }
+      // Klickbar: merke ohne _dur (noch laufend → kein Byte-Ende bekannt)
+      st.ev._dur = null;
+      hitTargets.push({ x:st.x, y:st.by, w, h:st.bh, ev: st.ev, label: '🔴 Aktiv: ' + feedLabel(st.ev) });
+    }
+  }
+  } catch (e) {
+    ctx.fillStyle = 'red'; ctx.font = '20px Consolas'; ctx.fillText(e.toString(), 200, 100);
+    console.error(e);
+  }
+}
+
+function _dot(ctx, x, y, r, col, ev) {
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  hitTargets.push({ x:x-r*3, y:y-r*3, w:r*6, h:r*6, ev, label: feedLabel(ev) });
+}
+
+function _stripe(ctx, x, col, ev) {
+  const H2 = HDR_H + TICK_H + RADIOS.length * ROW_H;
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.7;
+  ctx.beginPath(); ctx.moveTo(x, HDR_H+TICK_H); ctx.lineTo(x, H2); ctx.stroke();
+  ctx.globalAlpha = 1;
+  hitTargets.push({ x:x-6, y:HDR_H+TICK_H, w:12, h:H2-HDR_H-TICK_H, ev, label: feedLabel(ev) });
+}
+
+function drawTimeAxis(ctx, W, H) {
+  const total = maxTime();
+  const step  = pxPerSec>=120 ? 15 : pxPerSec>=60 ? 30 : pxPerSec>=20 ? 60 : 300;
+  ctx.fillStyle='#0d0d1a'; ctx.fillRect(LABEL_W,HDR_H,W-LABEL_W,TICK_H);
+  ctx.strokeStyle='rgba(252,227,0,0.2)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(LABEL_W,HDR_H+TICK_H); ctx.lineTo(W,HDR_H+TICK_H); ctx.stroke();
+  ctx.fillStyle='rgba(252,227,0,0.5)'; ctx.font='10px Consolas'; ctx.textBaseline='top';
+  for (let t=0; t<=total+step; t+=step) {
+    const x = LABEL_W + t * pxPerSec;
+    if (x > W) break;
+    ctx.strokeStyle='rgba(252,227,0,0.08)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,HDR_H+TICK_H-5); ctx.lineTo(x,H); ctx.stroke();
+    const label = MISSION.start ? absTime(t) : formatRel(t);
+    ctx.fillText(label, x+2, HDR_H+4);
+  }
+  ctx.fillStyle='#0d0d1a'; ctx.fillRect(0,0,LABEL_W,HDR_H+TICK_H);
+  ctx.fillStyle='#fce300'; ctx.font='bold 11px Consolas'; ctx.textBaseline='middle';
+  ctx.shadowColor='#fce300'; ctx.shadowBlur=8;
+  ctx.fillText('// ZEITSTRAHL', 8, HDR_H/2);
+  ctx.shadowBlur=0;
+}
+
+// ── Klick ─────────────────────────────────────────────────
+document.getElementById('tl').addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+  for (const h of hitTargets) {
+    if (mx>=h.x && mx<=h.x+h.w && my>=h.y && my<=h.y+h.h) {
+      document.getElementById('detail-title').textContent = h.label;
+      showDetail(h.ev);
+      return;
+    }
+  }
+});
+
+// ── Zoom ──────────────────────────────────────────────────
+function zoom(f) {
+  pxPerSec = Math.max(8, Math.min(600, pxPerSec*f));
+  document.getElementById('zoom-lbl').textContent = Math.round(pxPerSec/80*100)+'%';
+  draw();
+}
+function resetZoom() { pxPerSec=80; document.getElementById('zoom-lbl').textContent='100%'; draw(); }
+
+// ── Polyfill roundRect ─────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r) {
+    this.beginPath(); this.moveTo(x+r,y);
+    this.lineTo(x+w-r,y); this.quadraticCurveTo(x+w,y,x+w,y+r);
+    this.lineTo(x+w,y+h-r); this.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+    this.lineTo(x+r,y+h); this.quadraticCurveTo(x,y+h,x,y+h-r);
+    this.lineTo(x,y+r); this.quadraticCurveTo(x,y,x+r,y);
+    this.closePath();
+  };
+}
+
+function formatRel(s) {
+  const m=Math.floor(s/60), sec=Math.floor(s%60);
+  return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+}
+
+// Echtzeit-Uhrzeit aus Einsatz-Start + Offset
+function absTime(rel) {
+  if (!MISSION.start) return formatRel(rel);
+  const d = new Date((MISSION.start + rel) * 1000);
+  return d.toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+// ── Auto-Follow ──────────────────────────────────────────
+let followMode = true;
+let _lastProgScroll = -1;   // Zuletzt programmatisch gesetztes scrollLeft
+
+function toggleFollow() {
+  followMode = !followMode;
+  const btn = document.getElementById('btn-follow');
+  if (followMode) {
+    btn.style.background = 'rgba(252,227,0,.2)';
+    btn.style.color      = '#fce300';
+    scrollToNow();
+  } else {
+    btn.style.background = '';
+    btn.style.color      = '';
+  }
+}
+
+function scrollToNow() {
+  if (!followMode || !MISSION.active || !MISSION.start) return;
+  const nowRel = Date.now() / 1000 - MISSION.start;
+  const nowX   = LABEL_W + nowRel * pxPerSec;
+  const wrap   = document.getElementById('timeline-wrap');
+  const maxScroll = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
+  let target = nowX - wrap.clientWidth * 0.75;
+  target = Math.max(0, Math.min(target, maxScroll));
+  // Setze einen int-Wert, da scrollLeft oft gerundet wird
+  target = Math.round(target);
+  _lastProgScroll = target;
+  wrap.scrollLeft = target;
+}
+
+// Manuelles Scrollen → Follow-Modus deaktivieren
+// Vergleich mit letztem programmatischen scrollLeft (Toleranz ±3px)
+document.getElementById('timeline-wrap').addEventListener('scroll', function() {
+  if (Math.abs(this.scrollLeft - _lastProgScroll) <= 3) return;  // war unser Scroll
+  if (followMode) {
+    followMode = false;
+    const btn = document.getElementById('btn-follow');
+    btn.style.background = '';
+    btn.style.color      = '';
+  }
+});
+
+// Follow-Modus beim Start aktivieren (Button leuchtet gelb)
+(function initFollow() {
+  const btn = document.getElementById('btn-follow');
+  btn.style.background = 'rgba(252,227,0,.2)';
+  btn.style.color      = '#fce300';
+})();
+
+// Echtzeit-Redraw: 50ms (20fps) – DMR RTP-Paketrate 20ms, menschl. Wahrnehmung ~16ms
+setInterval(() => { draw(); scrollToNow(); }, 50);
+window.addEventListener('resize', draw);
+draw();
+
+// ── Notiz-Panel ──────────────────────────────────────────
+function toggleNotePanel() {
+  const p = document.getElementById('note-panel');
+  const isOpen = p.style.display !== 'none';
+  closeNotePanel(); closeImagePanel();
+  if (!isOpen) {
+    p.style.display = 'block';
+    document.getElementById('note-text').focus();
+    document.getElementById('btn-note').style.background = 'rgba(252,227,0,.15)';
+  }
+}
+function closeNotePanel() {
+  document.getElementById('note-panel').style.display = 'none';
+  document.getElementById('btn-note').style.background = '';
+  document.getElementById('note-status').textContent = '';
+}
+async function submitNote() {
+  const text = document.getElementById('note-text').value.trim();
+  if (!text) { document.getElementById('note-status').textContent = 'Bitte Text eingeben.'; return; }
+  document.getElementById('note-status').textContent = 'Speichern...';
+  try {
+    const r = await fetch('/note', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    if (r.ok) {
+      document.getElementById('note-text').value = '';
+      document.getElementById('note-status').style.color = '#39ff14';
+      document.getElementById('note-status').textContent = '✓ Notiz gespeichert';
+      setTimeout(closeNotePanel, 1200);
+    } else {
+      document.getElementById('note-status').textContent = 'Fehler: ' + r.status;
+    }
+  } catch(e) {
+    document.getElementById('note-status').textContent = 'Verbindungsfehler: ' + e;
+  }
+}
+
+// ── Bild-Panel ───────────────────────────────────────────
+function toggleImagePanel() {
+  const p = document.getElementById('img-panel');
+  const isOpen = p.style.display !== 'none';
+  closeNotePanel(); closeImagePanel();
+  if (!isOpen) {
+    p.style.display = 'block';
+    document.getElementById('btn-img').style.background = 'rgba(168,85,247,.15)';
+  }
+}
+function closeImagePanel() {
+  document.getElementById('img-panel').style.display = 'none';
+  document.getElementById('btn-img').style.background = '';
+  document.getElementById('img-status').textContent = '';
+  document.getElementById('img-preview').innerHTML = '';
+  document.getElementById('img-file').value = '';
+  document.getElementById('img-caption').value = '';
+}
+// Vorschau bei Dateiauswahl
+document.getElementById('img-file').addEventListener('change', function() {
+  const f = this.files[0];
+  const prev = document.getElementById('img-preview');
+  if (f) {
+    const url = URL.createObjectURL(f);
+    prev.innerHTML = `<img src="${url}" style="max-width:100%;max-height:140px;border:1px solid #3a3a5a;border-radius:2px">`;
+  } else {
+    prev.innerHTML = '';
+  }
+});
+async function submitImage() {
+  const fileInput = document.getElementById('img-file');
+  const caption   = document.getElementById('img-caption').value.trim();
+  if (!fileInput.files.length) {
+    document.getElementById('img-status').textContent = 'Bitte Datei auswaehlen.'; return;
+  }
+  document.getElementById('img-status').textContent = 'Hochladen...';
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  fd.append('caption', caption);
+  try {
+    const r = await fetch('/image', {method: 'POST', body: fd});
+    if (r.ok) {
+      document.getElementById('img-status').style.color = '#39ff14';
+      document.getElementById('img-status').textContent = '✓ Bild hochgeladen';
+      setTimeout(closeImagePanel, 1200);
+    } else {
+      document.getElementById('img-status').textContent = 'Fehler: ' + r.status;
+    }
+  } catch(e) {
+    document.getElementById('img-status').textContent = 'Verbindungsfehler: ' + e;
+  }
+}
+// Panels mit Escape schliessen
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeNotePanel(); closeImagePanel(); }
+});
+
+// ── UI Tabs & Collapse ─────────────────────────────────────
+function toggleTopTab(id) {
+  const btn = document.getElementById('tabbtn-' + id);
+  const panel = document.getElementById('panel-' + id);
+  if (btn.classList.contains('active')) {
+    btn.classList.remove('active');
+    panel.classList.remove('active');
+  } else {
+    document.querySelectorAll('.top-tab').forEach(b => {
+      if(b.id.startsWith('tabbtn-dash') || b.id.startsWith('tabbtn-filter')) b.classList.remove('active');
+    });
+    document.querySelectorAll('.top-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    panel.classList.add('active');
+  }
+  setTimeout(draw, 50);
+}
+
+function switchSidebarTab(id) {
+  document.querySelectorAll('.s-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.s-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('sbtn-' + id).classList.add('active');
+  document.getElementById('spane-' + id).classList.add('active');
+}
+
+function toggleSidebar() {
+  const sb = document.getElementById('sidebar');
+  const btn = document.getElementById('tabbtn-sidebar');
+  if (sb.classList.contains('collapsed')) {
+    sb.classList.remove('collapsed');
+    btn.style.color = 'var(--acc)';
+    btn.innerHTML = '▶ Seitenleiste';
+  } else {
+    sb.classList.add('collapsed');
+    btn.style.color = 'var(--sub)';
+    btn.innerHTML = '◀ Seitenleiste';
+  }
+  setTimeout(draw, 300);
+}
+
+// ── System-Dashboard Status-Poll ─────────────────────────
+const CIRC = 2 * Math.PI * 26;  // Umfang r=26
+
+function setGauge(arcId, txtId, pct, col) {
+  const el = document.getElementById(arcId);
+  const tx = document.getElementById(txtId);
+  if (!el || !tx) return;
+  const dash = Math.max(0, Math.min(1, (pct||0)/100)) * CIRC;
+  el.setAttribute('stroke-dasharray', `${dash.toFixed(1)} ${CIRC.toFixed(1)}`);
+  el.setAttribute('stroke', col);
+  tx.textContent = pct != null ? pct + '%' : '–%';
+}
+
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val ?? '–';
+}
+
+function updateDashboard(s) {
+  const u = s.usv || {};
+  const r = s.repeater || {};
+  const m = s.mission  || {};
+
+  // Batterie-Gauge (Farbe nach Ladestand)
+  const batt = u.batterie_pct;
+  const bCol = batt == null ? '#3a3a5a' : batt >= 60 ? '#39ff14' : batt >= 30 ? '#fce300' : '#ff3333';
+  setGauge('g-batt-arc', 'g-batt-txt', batt, bCol);
+
+  // Last-Gauge
+  const last = u.last_pct;
+  const lCol = last == null ? '#3a3a5a' : last <= 70 ? '#fce300' : '#ff6600';
+  setGauge('g-last-arc', 'g-last-txt', last, lCol);
+
+  set('d-batt-min', u.batterie_min);
+  set('d-temp',     u.temperatur != null ? u.temperatur : null);
+  set('d-ein',      u.eingang_volt != null ? `${u.eingang_volt} / ${u.eingang_hz || '–'} Hz` : null);
+  set('d-aus',      u.ausgang_volt != null ? `${u.ausgang_volt} / ${u.ausgang_hz || '–'} Hz` : null);
+
+  // Netz-Status-Farbe
+  const ns = u.netz_status || '–';
+  const nEl = document.getElementById('d-netz');
+  if (nEl) {
+    nEl.textContent = ns;
+    nEl.style.color = ns === 'Normal' ? '#39ff14' : ns === 'Batterie!' ? '#ff3333' : '#fce300';
+  }
+
+  // USV-Card Border-Farbe
+  const card = document.getElementById('dash-usv');
+  if (card) card.style.borderColor = ns === 'Normal' ? '#1a2a1a' :
+    ns === 'Batterie!' ? '#ff3333' : '#fce300';
+
+  // Repeater
+  const online = r.online;
+  const repEl  = document.getElementById('d-rep-online');
+  if (repEl) {
+    repEl.textContent = online ? '🟢 Verbunden' : '🔴 Getrennt';
+    repEl.style.color = online ? '#39ff14' : '#ff3333';
+  }
+  const age = r.heartbeat_age_s;
+  set('d-rep-age', age != null ? age + ' s' : null);
+  set('d-rep-ip',  r.addr ? (Array.isArray(r.addr) ? r.addr[0] : r.addr) : null);
+
+  // Einsatz
+  set('d-mis-name', m.name || '–');
+  set('d-mis-evts', m.event_count ?? 0);
+  const ptts = m.active_ptts || [];
+  const pttEl = document.getElementById('d-mis-ptts');
+  if (pttEl) {
+    if (ptts.length === 0) {
+      pttEl.textContent = 'Keine aktiven PTTs';
+      pttEl.style.color = '#3a3a5a';
+    } else {
+      pttEl.textContent = ptts.map(p => `🔴 ${p.slot}`).join(', ');
+      pttEl.style.color = '#ff3333';
+    }
+  }
+
+  // Router
+  const rt = s.router || {};
+  if (rt.erreichbar) {
+    set('d-router-name', (rt.sys_name || '').substring(0, 12));
+    let sec = Math.floor(rt.uptime_s || 0);
+    let d = Math.floor(sec / 86400); sec %= 86400;
+    let h = Math.floor(sec / 3600); sec %= 3600;
+    let m = Math.floor(sec / 60); sec %= 60;
+    let uStr = d > 0 ? `${d}d ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}` 
+                     : `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    set('d-router-uptime', uStr);
+    let stEl = document.getElementById('d-router-status');
+    if (stEl) { stEl.textContent = 'Verbunden'; stEl.style.color = '#39ff14'; }
+    set('d-router-cpu', rt.cpu_load != null ? rt.cpu_load + '%' : '–');
+    set('d-router-rx', rt.traffic_in_mbps != null ? rt.traffic_in_mbps.toFixed(1) + ' M/s' : '–');
+    set('d-router-tx', rt.traffic_out_mbps != null ? rt.traffic_out_mbps.toFixed(1) + ' M/s' : '–');
+  } else {
+    set('d-router-name', '–');
+    set('d-router-uptime', '–');
+    let stEl = document.getElementById('d-router-status');
+    if (stEl) { stEl.textContent = '–'; stEl.style.color = '#3a3a5a'; }
+    set('d-router-cpu', '–');
+    set('d-router-rx', '–');
+    set('d-router-tx', '–');
+  }
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch(BASE + '/status', {signal: AbortSignal.timeout(3000)});
+    if (r.ok) updateDashboard(await r.json());
+  } catch(e) { /* Server nicht erreichbar */ }
+}
+pollStatus();
+setInterval(pollStatus, 5000);
+
+</script>
+</body>
+</html>

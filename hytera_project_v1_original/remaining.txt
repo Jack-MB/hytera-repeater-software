@@ -1,0 +1,1 @@
+981: _btn(bf, "↩ Zur�cksetzen", self._apply_cfg,

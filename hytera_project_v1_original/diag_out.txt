@@ -1,0 +1,50 @@
+# TP-Link Router SNMP Settings
+"router_enabled": False,
+"router_ip":      "192.168.0.1",
+"router_community": "public",
+self._router_mon = None
+# Router-Schnellstatus
+router_quick = _panel(mid, title="🌐 TP-Link Router", accent=C["org"])
+router_quick._outer.pack(side="left", fill="both", expand=True, padx=(6, 0))
+rg = tk.Frame(router_quick, bg=C["panel"])
+self._router_quick_labels = {}
+self._router_quick_labels[key] = val
+router_pnl = _panel(tab, title="TP-Link ER605  –  SNMP Monitor", accent=C["org"])
+router_pnl._outer.pack(fill="x", padx=8, pady=4)
+rg = tk.Frame(router_pnl, bg=C["panel"]); rg.pack(padx=10, pady=6)
+row(rg, "Router IP:",      "_s_router_ip", 14, 0, 0)
+row(rg, "Community:",      "_s_router_comm", 14, 0, 1)
+self._var_router_en = tk.BooleanVar()
+tk.Checkbutton(rg, text="Router-Monitor aktivieren",
+variable=self._var_router_en,
+self._s_router_ip.set(c.get("router_ip", "192.168.0.1"))
+self._s_router_comm.set(c.get("router_community", "public"))
+self._var_router_en.set(c.get("router_enabled", False))
+"router_ip":     self._s_router_ip.get().strip(),
+"router_community": self._s_router_comm.get().strip(),
+"router_enabled": self._var_router_en.get(),
+if cfg.get("router_enabled"):
+from router_monitor import RouterMonitor
+self._router_mon = RouterMonitor(
+ip=cfg.get("router_ip", "192.168.0.1"),
+community=cfg.get("router_community", "public"),
+self.after(0, self._update_router_quick, d),
+getattr(self, '_sse_server').set_router(d.as_dict() if hasattr(d, 'as_dict') else {})
+self._router_mon.start()
+if self._router_mon:
+self._router_mon.stop()
+self._router_mon = None
+def _update_router_quick(self, d):
+if not hasattr(self, '_router_quick_labels') or not self._router_quick_labels:
+self._router_quick_labels["sys"].config(text=d.sys_name[:12])
+self._router_quick_labels["up"].config(text=up_str)
+self._router_quick_labels["stat"].config(text="Verbunden", fg=C["grn"])
+self._router_quick_labels["cpu"].config(text=cpu)
+self._router_quick_labels["rx"].config(text=f"{d.traffic_in_mbps:.1f} M/s")
+self._router_quick_labels["tx"].config(text=f"{d.traffic_out_mbps:.1f} M/s")
+self._router_quick_labels["sys"].config(text="–")
+self._router_quick_labels["up"].config(text="–")
+self._router_quick_labels["stat"].config(text="Offline", fg=C["red"])
+self._router_quick_labels["cpu"].config(text="–")
+self._router_quick_labels["rx"].config(text="–")
+self._router_quick_labels["tx"].config(text="–")

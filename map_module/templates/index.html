@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hytera HR1065 – Taktischer Lageplan & Timeline</title>
+  
+  <!-- Lokale Leaflet CSS mit CDN-Fallback -->
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" onerror="this.onerror=null;this.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';">
+  <!-- Lokale vis.js Timeline CSS mit CDN-Fallback -->
+  <link rel="stylesheet" href="/static/vendor/vis/vis-timeline-graph2d.min.css" onerror="this.onerror=null;this.href='https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css';">
+  
+  <!-- Stylesheet mit Business Casual & Taktischem Modus -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="theme-business">
+
+  <!-- ==================== TOP HEADER / NAVIGATION ==================== -->
+  <header id="hud-header">
+    <div class="hud-brand">
+      <div class="hud-logo-icon">📡</div>
+      <div class="hud-title-wrap">
+        <h1 class="hud-title">HYTERA HR1065 // LAGEZENTRUM</h1>
+        <span class="hud-subtitle">DMR DISPATCH & TACTICAL INCIDENT TIMELINE</span>
+      </div>
+    </div>
+
+    <!-- Live Status & Funk-Warnbanner -->
+    <div id="ptt-alert-banner" class="ptt-banner-idle">
+      <span id="ptt-pulse-icon" class="ptt-icon">🎙️</span>
+      <span id="ptt-banner-text">FUNKBEREITSCHAFT IDLE</span>
+    </div>
+
+    <!-- Schnell-Statistiken & Infrastruktur-Status -->
+    <div class="hud-telemetry">
+      <div class="telem-item">
+        <span class="telem-lbl">GPS:</span>
+        <span id="stat-radios-gps" class="telem-val">0</span>
+      </div>
+      <div class="telem-item">
+        <span class="telem-lbl">NO-GPS:</span>
+        <span id="stat-radios-nogps" class="telem-val">0</span>
+      </div>
+      <div class="telem-item">
+        <span class="telem-lbl">MARKER:</span>
+        <span id="stat-markers" class="telem-val">0</span>
+      </div>
+      <!-- Live Infrastruktur Status-Pills -->
+      <div id="pill-repeater" class="telem-item pill-btn" title="Hytera HR1065 Repeater-Status (Klicken für Details)">
+        <span class="telem-lbl">📡 RPT:</span>
+        <span id="stat-repeater-summary" class="telem-val">42°C | 25W</span>
+      </div>
+      <div id="pill-usv" class="telem-item pill-btn" title="BlueWalker USV Notstromstatus (Klicken für Details)">
+        <span class="telem-lbl">⚡ USV:</span>
+        <span id="stat-usv-summary" class="telem-val">98% (Netz)</span>
+      </div>
+      <div id="pill-router" class="telem-item pill-btn" title="ZTE LTE-Router Status (Klicken für Details)">
+        <span class="telem-lbl">📶 LTE:</span>
+        <span id="stat-router-summary" class="telem-val">4G Telekom</span>
+      </div>
+      <div class="telem-item">
+        <span class="telem-lbl">ZEIT UTC:</span>
+        <span id="clock-utc" class="telem-val mono">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- Theme-Umschalter & Status -->
+    <div class="hud-actions">
+      <!-- Design Theme Switcher (Business Casual <--> Taktisch Dark) -->
+      <button id="btn-theme-toggle" class="btn btn-theme" title="Design umschalten (Business Casual / Taktisch Dark)">
+        <span id="theme-icon">💼</span>
+        <span id="theme-label">BUSINESS CASUAL</span>
+      </button>
+
+      <div class="hud-connection">
+        <div id="conn-dot" class="dot-connecting" title="Verbinde mit Live-Server..."></div>
+        <span id="conn-status-text">VERBINDE...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==================== WERKZEUGLEISTE MIT TOGGLES & AKTIONEN ==================== -->
+  <nav id="hud-toolbar">
+    <!-- Zone 1: Navigation & Stream Links -->
+    <div class="tool-group">
+      <button id="btn-live-toggle" class="btn btn-active" title="Live-Stream aktiv (Taste: L)">
+        <span class="btn-dot live-dot"></span> LIVE
+      </button>
+      <button id="btn-recenter" class="btn" title="Karte auf Einsatzgebiet zentrieren (Taste: Leertaste)">
+        🎯 ZENTRIEREN
+      </button>
+      <button id="btn-map-compass" class="btn" title="Karte auf Nord ausrichten / Reset (Taste: N)">
+        <span id="compass-icon" class="compass-icon">🧭</span> <span id="compass-angle-label">0° NORD</span>
+      </button>
+      <button id="btn-rotate-left" class="btn btn-icon" title="Karte 15° links drehen (Taste: Shift+R)">↩️</button>
+      <button id="btn-rotate-right" class="btn btn-icon" title="Karte 15° rechts drehen (Taste: R)">↪️</button>
+    </div>
+
+    <!-- Zone 2: Primäre Einsatz-Aktionen (Hervorgehoben) -->
+    <div class="tool-group tool-group-center">
+      <button id="btn-add-marker-mode" class="btn btn-cta" title="Neuen Einsatzmarker auf der Karte erfassen (Taste: N)">
+        ➕ NEUER VORFALL
+      </button>
+      <button id="btn-open-georef" class="btn btn-action" title="PDF- oder Bild-Lageplan hochladen & per GPS auf Karte verankern">
+        📐 PLAN VERANKERN / UPLOAD
+      </button>
+    </div>
+
+    <!-- Zone 3: Ebenen-Dropdown & System-Zugriff Rechts -->
+    <div class="tool-group right-align">
+      <!-- Kompaktes Dropdown: Ebenen, Filter & Funk-Toggles -->
+      <div class="dropdown-wrapper">
+        <button id="btn-dropdown-layers" class="btn btn-dropdown" title="Karten-Ebenen, Overlays und Filter steuern">
+          🗺️ EBENEN & FILTER ▾
+        </button>
+        <div id="dropdown-layers-menu" class="dropdown-menu-hidden">
+          <div class="dropdown-header">KARTEN-EBENEN</div>
+          <div class="dropdown-item">
+            <button id="btn-overlay-toggle" class="btn btn-active btn-block">🗺️ LAGEPLAN: AN</button>
+          </div>
+          <div class="dropdown-item slider-item">
+            <span class="slider-lbl">DECKKRAFT:</span>
+            <input type="range" id="overlay-opacity-slider" min="10" max="100" value="85">
+            <span id="overlay-opacity-val" class="slider-num">85%</span>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-breadcrumbs-toggle" class="btn btn-active btn-block">🛰️ SPUREN: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-markers-toggle" class="btn btn-active btn-block">📍 MARKER: AN</button>
+          </div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-header">KARTEN-ROTATION & AUSRICHTUNG</div>
+          <div class="dropdown-item slider-item">
+            <span class="slider-lbl">ROTATION:</span>
+            <input type="range" id="map-rotation-slider" min="0" max="355" step="5" value="0">
+            <span id="map-rotation-val" class="slider-num">0°</span>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-trackup-toggle" class="btn btn-block" title="Karte an Bewegungsrichtung des aktiven Funkgeräts ausrichten">🧭 TRACK-UP: AUS</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-reset-rotation" class="btn btn-secondary btn-block">🧭 NORD-AUSRICHTUNG (0°)</button>
+          </div>
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-header">FUNK-TRACKING & SIGNALE</div>
+          <div class="dropdown-item">
+            <button id="btn-gps-toggle" class="btn btn-active btn-block">🛰️ GPS: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-ptt-pulse-toggle" class="btn btn-active btn-block">🎙️ PTT-PULS: AN</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-autopan-toggle" class="btn btn-block">🎯 AUTO-PAN: AUS</button>
+          </div>
+          <div class="dropdown-item">
+            <button id="btn-audio-toggle" class="btn btn-active btn-block">🔊 AUDIO: AN</button>
+          </div>
+        </div>
+      </div>
+
+      <button id="btn-timeline-toggle" class="btn btn-active" title="Timeline unten ein- oder einklappen (Taste: T)">
+        ⏱️ ZEITSTRAHL: AN
+      </button>
+      <button id="btn-open-infra" class="btn btn-infra" title="Infrastruktur- & Hardware-Überwachung (Repeater, USV, LTE) öffnen">
+        ⚡ ÜBERWACHUNG
+      </button>
+      <button id="btn-open-settings" class="btn btn-settings" title="Umfassendes Kontrollzentrum aller Toggles öffnen">
+        ⚙️ ALLE TOGGLES
+      </button>
+      <button id="btn-toggle-sidebar" class="btn" title="Einheitenliste ein/ausklappen (Taste: S)">
+        📋 SEITENLEISTE
+      </button>
+    </div>
+  </nav>
+
+  <!-- ==================== DOCK: PLAN-VERANKERUNG / KALIBRIERUNG ==================== -->
+  <div id="georef-dock" class="georef-dock-hidden">
+    <div class="georef-dock-content">
+      <div class="georef-info">
+        <span class="georef-badge">📐 LAGEPLAN-KALIBRIERUNG AKTIV</span>
+        <span id="georef-filename" class="georef-name">tactical_overlay.png</span>
+        <span class="georef-hint">Ziehen Sie die 4 Eck-Anker (NW, NO, SO, SW) auf der Karte, um den Plan an Straßen & Gebäuden auszurichten.</span>
+      </div>
+      <div class="georef-controls">
+        <div class="slider-control" title="Transparenz während der Kalibrierung anpassen">
+          <span class="slider-lbl">OPAC:</span>
+          <input type="range" id="georef-opacity-slider" min="10" max="100" value="70">
+          <span id="georef-opacity-val" class="slider-num">70%</span>
+        </div>
+        <div class="slider-control" title="Lageplan-Drehwinkel anpassen">
+          <span class="slider-lbl">DREHUNG:</span>
+          <input type="range" id="georef-rotation-slider" min="0" max="355" step="1" value="0">
+          <span id="georef-rotation-val" class="slider-num">0°</span>
+        </div>
+        <button id="btn-georef-rotate-cw" class="btn" title="Plan um 90° im Uhrzeigersinn drehen">🔄 90°</button>
+        <button id="btn-georef-fit" class="btn" title="Plan auf aktuellen Kartenausschnitt einpassen">📐 AUF ANSICHT EINPASSEN</button>
+        <button id="btn-georef-save" class="btn btn-primary" title="GPS-Grenzkoordinaten speichern und dauerhaft verankern">💾 PLAN SPEICHERN & VERANKERN</button>
+        <button id="btn-georef-cancel" class="btn btn-danger" title="Kalibrierung abbrechen">❌ ABBRECHEN</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== HINWEISLEISTE BEI MANUELLER STANDORTZUWEISUNG ==================== -->
+  <div id="placement-banner" class="placement-banner-hidden">
+    <div class="placement-content">
+      <span class="place-icon">📍</span>
+      <span id="placement-text">Klicken Sie auf die Karte, um den Standort für das Funkgerät festzulegen.</span>
+      <button id="btn-cancel-placement" class="btn btn-danger">ABBRECHEN</button>
+    </div>
+  </div>
+
+  <!-- ==================== REPLAY-BANNER (WIRD IM ZEITREISE-MODUS EINGEBLENDET) ==================== -->
+  <div id="replay-banner" class="replay-banner-hidden">
+    <div class="replay-content">
+      <span class="replay-icon">⏮️</span>
+      <span class="replay-title">HISTORISCHER REPLAY-MODUS:</span>
+      <span id="replay-target-time" class="replay-time">2026-09-08 20:30:00 UTC</span>
+      <span class="replay-hint">(Live-Updates pausiert – zeigt vergangenen Einsatzstand)</span>
+      <button id="btn-return-live" class="btn btn-danger">🔴 ZURÜCK ZU LIVE</button>
+    </div>
+  </div>
+
+  <!-- ==================== HAUPTBEREICH (KARTE & SIDEBAR) ==================== -->
+  <main id="hud-main-workspace">
+    <!-- LEAFLET KARTEN-CONTAINER -->
+    <div id="map-container">
+      <div id="map"></div>
+      
+      <!-- Fadenkreuz-Overlay im Zentrum -->
+      <div class="tactical-crosshair"></div>
+      
+      <!-- Floating Call-Log Ticker (Letzte Funksprüche) -->
+      <div id="hud-call-log" class="call-log-widget">
+        <div class="call-log-header">
+          <span class="cl-title">🎙️ LETZTE FUNKSPRÜCHE</span>
+          <span id="cl-badge" class="cl-badge">LIVE</span>
+        </div>
+        <div id="call-log-list" class="call-log-list">
+          <div class="cl-empty">Warte auf Funkverkehr...</div>
+        </div>
+      </div>
+
+      <!-- Maßstabs- und Koordinaten-HUD unten links -->
+      <div id="mouse-coords-hud" class="map-hud-overlay">
+        KOORD: <span id="val-mouse-coords">51.232500° N, 006.780000° E</span>
+      </div>
+    </div>
+
+    <!-- TAKTISCHE SIDEBAR (EINHEITEN MIT/OHNE GPS & VORFÄLLE) -->
+    <aside id="hud-sidebar" class="sidebar-open">
+      <!-- Einheiten-Suchfeld -->
+      <div class="sidebar-search-box">
+        <input type="text" id="input-radio-search" placeholder="🔍 Funkgerät, Rufname oder ID filtern..." autocomplete="off">
+        <button id="btn-clear-search" class="btn-clear-search" title="Suche leeren">&times;</button>
+      </div>
+
+      <!-- 1. Einheiten mit GPS-Tracking -->
+      <div class="sidebar-header">
+        <span class="sb-title">🛰️ EINHEITEN MIT GPS</span>
+        <span id="sb-gps-count" class="sb-badge">0 AKTIV</span>
+      </div>
+      <div id="radio-gps-list-panel" class="sidebar-list">
+        <div class="list-placeholder">Keine GPS-Einheiten aktiv...</div>
+      </div>
+
+      <!-- 2. Einheiten ohne GPS (Handfunkgeräte / Stationär) -->
+      <div class="sidebar-header border-top">
+        <span class="sb-title">📻 SPRECHFUNK OHNE GPS</span>
+        <span id="sb-nogps-count" class="sb-badge badge-neutral">0 GERÄTE</span>
+      </div>
+      <div id="radio-nogps-list-panel" class="sidebar-list">
+        <div class="list-placeholder">Keine No-GPS-Geräte...</div>
+      </div>
+
+      <!-- 3. Lage- und Vorfallsmarker -->
+      <div class="sidebar-header border-top">
+        <span class="sb-title">📍 LAGE- & VORFALLSMARKER</span>
+        <span id="sb-marker-count" class="sb-badge">0 GESAMT</span>
+      </div>
+      <div id="marker-list-panel" class="sidebar-list">
+        <div class="list-placeholder">Keine Vorfälle markiert.</div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ==================== UNTERER ZEITSTRAHL (VIS.JS TIMELINE) ==================== -->
+  <footer id="hud-timeline-dock">
+    <div class="timeline-hud-bar">
+      <div class="tl-title-wrap">
+        <span class="tl-title">TACTICAL TIMELINE // PTT-SPRECHPHASEN & VORFALLSERFASSUNG</span>
+      </div>
+      <div class="tl-controls">
+        <!-- Replay Schnellwahltasten -->
+        <div class="replay-quick-group">
+          <button id="btn-replay-minus-1m" class="tl-btn tl-jump-btn" title="1 Minute zurückspringen">⏪ -1m</button>
+          <button id="btn-replay-minus-5m" class="tl-btn tl-jump-btn" title="5 Minuten zurückspringen">⏪ -5m</button>
+          <button id="btn-replay-minus-15m" class="tl-btn tl-jump-btn" title="15 Minuten zurückspringen">⏪ -15m</button>
+        </div>
+        <button id="btn-tl-zoom-in" class="tl-btn" title="Hineinzoomen">🔍+</button>
+        <button id="btn-tl-zoom-out" class="tl-btn" title="Herauszoomen">🔍-</button>
+        <button id="btn-tl-fit" class="tl-btn" title="Gesamten Einsatzzeitraum zeigen">↔️ EINSATZ</button>
+        <button id="btn-tl-now" class="tl-btn" title="Zum aktuellen Zeitpunkt springen">⏱️ JETZT</button>
+        <button id="btn-tl-close" class="tl-btn tl-btn-close" title="Timeline einklappen">✖</button>
+      </div>
+    </div>
+
+    <!-- Container für vis.js -->
+    <div id="visualization-timeline"></div>
+  </footer>
+
+  <!-- ==================== MODAL 1: ALLE TOGGLES & EINSTELLUNGEN ==================== -->
+  <div id="settings-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="settings-modal" class="tactical-modal settings-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">⚙️ SYSTEM-TOGGLES & EINSATZ-OPTIONEN</h3>
+        <button id="btn-settings-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+      
+      <div class="settings-content">
+        <div class="settings-grid">
+          <!-- Toggle 1: GPS Tracking -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🛰️ GPS-Tracking aktiv</span>
+              <span class="setting-desc">Aktiviert die Positionsüberwachung von GPS-fähigen Funkgeräten. Ausschalten für reine Sprechfunk-Einsätze ohne GPS.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-gps-tracking" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 2: Geräte ohne GPS auf Karte -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">📻 Handfunkgeräte ohne GPS auf Karte anzeigen</span>
+              <span class="setting-desc">Zeigt Handfunkgeräte mit manuell gesetzten Standorten auf der Karte an.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-show-no-gps" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 3: PTT Puls auf Karte -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🎙️ PTT-Puls-Animation auf Karte</span>
+              <span class="setting-desc">Rote radiale Pulse um den Marker der funkenden Einheit bei Sprachübertragung.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-ptt-pulse" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 4: Auto-Pan auf sprechende Einheit -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🎯 Auto-Pan bei Funkspruch</span>
+              <span class="setting-desc">Kamera schwenkt automatisch sanft zu der Einheit, die gerade spricht.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-auto-pan">
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 5: Lageplan-Overlay -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🗺️ Taktischer Lageplan (Overlay)</span>
+              <span class="setting-desc">Blendet das Gelände- und Werksplan-Overlay über der Karte ein.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-overlay" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 6: Einsatzmarker -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">📍 Vorfalls- und Einsatzmarker</span>
+              <span class="setting-desc">Zeigt markierte Vorfälle, Gefahren und Kontrollpunkte auf der Karte an.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-markers" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 7: Rufzeichen-Labels -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🏷️ Rufzeichen-Schilder an Einheiten</span>
+              <span class="setting-desc">Blendet die Beschriftungs-Tags unter den Funkgerätemarkern ein oder aus.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-labels" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 8: Bewegungsspuren -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🛰️ Bewegungsspuren (Breadcrumbs)</span>
+              <span class="setting-desc">Historische Bewegungspfade der letzten Fixes hinter den Einheiten zeichnen.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-breadcrumbs" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 9: Audio-Chirp -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🔊 Akustischer Funkspruch-Ton</span>
+              <span class="setting-desc">Spielt einen dezenten zweistufigen Signalton beim Beginn eines Funkspruchs ab.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-audio" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 10: Timeline anzeigen -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">⏱️ Tactical Timeline Dock</span>
+              <span class="setting-desc">Zeigt den Zeitstrahl am unteren Bildschirmrand an oder klappt ihn für volle Kartenhöhe ein.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-timeline" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+
+          <!-- Toggle 11: Mock-Simulator -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">🤖 Telemetrie- & PTT-Simulator</span>
+              <span class="setting-desc">Erzeugt synthetische Einheitenbewegungen und Funksprüche für Vorführung und Tests.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggle-mock" checked>
+              <span class="switch-slider round"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-footer border-top">
+          <button type="button" id="btn-settings-save" class="btn btn-primary">EINSTELLUNGEN ÜBERNEHMEN</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 2: NEUER VORFALLSMARKER ==================== -->
+  <div id="modal-backdrop" class="modal-backdrop-hidden">
+    <div id="incident-modal" class="tactical-modal">
+      <div class="modal-header">
+        <h3 class="modal-title">📍 NEUEN VORFALLSMARKER ERFASSEN</h3>
+        <button id="btn-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+      
+      <form id="form-new-marker">
+        <div class="form-row">
+          <div class="form-group half">
+            <label for="input-lat">Breitengrad (Lat):</label>
+            <input type="number" step="0.000001" id="input-lat" name="lat" required>
+          </div>
+          <div class="form-group half">
+            <label for="input-lon">Längengrad (Lon):</label>
+            <input type="number" step="0.000001" id="input-lon" name="lon" required>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group half">
+            <label for="select-typ">Vorfallstyp:</label>
+            <select id="select-typ" name="typ">
+              <option value="incident">⚠️ Vorfall / Einsatz</option>
+              <option value="hazard">☣️ Gefahrstelle / Sperrzone</option>
+              <option value="checkpoint">🛡️ Kontrollpunkt / CP</option>
+              <option value="medical">🚑 Sanitätsdienst / Verletzte</option>
+              <option value="roadblock">⛔ Straßensperrung</option>
+              <option value="base">🏢 Einsatzleitung / HQ</option>
+              <option value="info">ℹ️ Lage-Information</option>
+            </select>
+          </div>
+          <div class="form-group half">
+            <label for="select-prio">Prioritätsstufe:</label>
+            <select id="select-prio" name="prioritaet">
+              <option value="low">Niedrig (Routine)</option>
+              <option value="normal" selected>Normal (Standard)</option>
+              <option value="high">Hoch (Dringend)</option>
+              <option value="critical">🚨 KRITISCH (Sofortmaßnahme)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="input-beschreibung">Vorfallsbeschreibung / Lagebericht:</label>
+          <textarea id="input-beschreibung" name="beschreibung" rows="3" placeholder="Genaue Situationsbeschreibung, betroffene Einheiten, eingeleitete Maßnahmen..." required></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="input-author">Erfasser / Funk-Disponent:</label>
+          <input type="text" id="input-author" name="author" value="Einsatzleitung" placeholder="Name oder Rufzeichen">
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="btn-modal-cancel" class="btn">ABBRECHEN</button>
+          <button type="submit" id="btn-modal-submit" class="btn btn-primary">MARKER SETZEN & SENDEN</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 3: INFRASTRUKTUR- & HARDWARE-ÜBERWACHUNG ==================== -->
+  <div id="infra-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="infra-modal" class="tactical-modal infra-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">⚡ REPEATER-, USV- & NETZWERK-ÜBERWACHUNG</h3>
+        <button id="btn-infra-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+      
+      <div class="infra-content">
+        <!-- 3-Spaltiges Dashboard für die überwachten Systeme -->
+        <div class="infra-grid">
+          <!-- KARTE 1: HYTERA HR1065 REPEATER -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">📡 HYTERA HR1065 REPEATER</span>
+              <span id="rpt-status-badge" class="badge-online">ONLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">IP-Adresse:</span><span id="rpt-ip" class="i-val mono">192.168.1.100</span></div>
+              <div class="infra-row"><span class="i-lbl">Sendeleistung (Fwd):</span><span id="rpt-fwd-pwr" class="i-val bold">25.0 W</span></div>
+              <div class="infra-row"><span class="i-lbl">Reflektierte Leistung:</span><span id="rpt-rfl-pwr" class="i-val">0.6 W</span></div>
+              <div class="infra-row"><span class="i-lbl">VSWR-Stehwellenverh.:</span><span id="rpt-vswr" class="i-val badge-good">1.15 (GUT)</span></div>
+              <div class="infra-row"><span class="i-lbl">Endstufen-Temperatur:</span><span id="rpt-temp" class="i-val">42.4 °C</span></div>
+              <div class="infra-row"><span class="i-lbl">Lüfterdrehzahl:</span><span id="rpt-fan" class="i-val">2400 RPM</span></div>
+              <div class="infra-row"><span class="i-lbl">Betriebsspannung:</span><span id="rpt-volt" class="i-val">13.8 V DC</span></div>
+              <div class="infra-row"><span class="i-lbl">Stromquelle:</span><span id="rpt-power-src" class="i-val">DC (Netzteil)</span></div>
+              <div class="infra-divider"></div>
+              <div class="infra-row"><span class="i-lbl">Signal TS1 (Slot 1):</span><span id="rpt-rssi-ts1" class="i-val">-88 dBm</span></div>
+              <div class="infra-row"><span class="i-lbl">Signal TS2 (Slot 2):</span><span id="rpt-rssi-ts2" class="i-val">-94 dBm</span></div>
+              <div class="infra-alarms-box">
+                <span class="i-lbl">Hardware-Alarme:</span>
+                <span class="alarm-pill pill-ok">VSWR: OK</span>
+                <span class="alarm-pill pill-ok">TEMP: OK</span>
+                <span class="alarm-pill pill-ok">FAN: OK</span>
+                <span class="alarm-pill pill-ok">PLL: OK</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- KARTE 2: USV NOTSTROMVERSORGUNG -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">⚡ USV NOTSTROM (BLUEWALKER)</span>
+              <span id="usv-status-badge" class="badge-online">ONLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Modell:</span><span class="i-val">PowerWalker VFI 2000 (Modbus)</span></div>
+              <div class="infra-row"><span class="i-lbl">IP-Adresse:</span><span id="usv-ip" class="i-val mono">192.168.1.102:502</span></div>
+              <div class="infra-row"><span class="i-lbl">Netz-Status:</span><span id="usv-mains-status" class="i-val badge-good">Normal (Netzbetrieb)</span></div>
+              <div class="infra-row"><span class="i-lbl">Batterie-Ladestand:</span><span id="usv-batt-pct" class="i-val bold">98 %</span></div>
+              <div class="battery-bar-wrap">
+                <div id="usv-battery-fill" class="battery-bar-fill" style="width: 98%;"></div>
+              </div>
+              <div class="infra-row"><span class="i-lbl">Autonomie / Restlaufzeit:</span><span id="usv-batt-min" class="i-val bold">145 Minuten</span></div>
+              <div class="infra-row"><span class="i-lbl">Eingang Spannung / Freq:</span><span id="usv-in-volt" class="i-val">231.4 V / 50.0 Hz</span></div>
+              <div class="infra-row"><span class="i-lbl">Ausgangsspannung:</span><span id="usv-out-volt" class="i-val">230.1 V</span></div>
+              <div class="infra-row"><span class="i-lbl">USV-Auslastung:</span><span id="usv-load" class="i-val">28.5 %</span></div>
+              <div class="infra-row"><span class="i-lbl">Innentemperatur:</span><span id="usv-temp" class="i-val">27.2 °C</span></div>
+            </div>
+          </div>
+
+          <!-- KARTE 3: ROUTER & LTE VERBINDUNG -->
+          <div class="infra-card">
+            <div class="infra-card-header">
+              <span class="infra-card-title">📶 ROUTER & LTE (SPEEDBOX)</span>
+              <span id="router-status-badge" class="badge-online">ONLINE</span>
+            </div>
+            <div class="infra-card-body">
+              <div class="infra-row"><span class="i-lbl">Modell / IP:</span><span class="i-val mono">ZTE MF281 / 192.168.0.1</span></div>
+              <div class="infra-row"><span class="i-lbl">Mobilfunk-Provider:</span><span id="router-provider" class="i-val bold">Deutsche Telekom</span></div>
+              <div class="infra-row"><span class="i-lbl">Netzwerk-Technologie:</span><span id="router-net-type" class="i-val">4G LTE-CA</span></div>
+              <div class="infra-row"><span class="i-lbl">Signalstärke:</span><span id="router-signal-bars" class="i-val">📶 4 / 5 Balken</span></div>
+              <div class="infra-row"><span class="i-lbl">RSRP (Pegel):</span><span id="router-rsrp" class="i-val">-84 dBm</span></div>
+              <div class="infra-row"><span class="i-lbl">SINR (Signal-Rausch):</span><span id="router-sinr" class="i-val">16.5 dB (Hervorragend)</span></div>
+              <div class="infra-row"><span class="i-lbl">WAN IP-Adresse:</span><span id="router-wan-ip" class="i-val mono">10.142.88.19</span></div>
+              <div class="infra-row"><span class="i-lbl">Echtzeit-Durchsatz:</span><span id="router-throughput" class="i-val">⬇️ 12.8 Mbps | ⬆️ 3.4 Mbps</span></div>
+              <div class="infra-row"><span class="i-lbl">Internet-Latenz (Ping):</span><span id="router-ping" class="i-val badge-good">28 ms</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer border-top">
+          <button type="button" id="btn-infra-close-btn" class="btn btn-primary">SCHLIESSEN</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 4: LAGEPLAN UPLOAD & GPS-VERANKERUNG ==================== -->
+  <div id="georef-modal-backdrop" class="modal-backdrop-hidden">
+    <div id="georef-modal" class="tactical-modal georef-modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">📐 LAGEPLAN HOCHLADEN & GPS-VERANKERN</h3>
+        <button id="btn-georef-modal-close" class="btn-close" title="Schließen">&times;</button>
+      </div>
+
+      <div class="georef-modal-body">
+        <p class="modal-intro">
+          Laden Sie einen Gebäudeplan, eine Feuerwehrlaufkarte oder ein Luftbild als <strong>PDF</strong>, <strong>PNG</strong> oder <strong>JPG</strong> hoch.
+          Das System bereitet den Plan vor und öffnet anschließend die interaktive GPS-Verankerung auf der Karte.
+        </p>
+
+        <!-- Dropzone / Datei-Auswahl -->
+        <div id="georef-dropzone" class="georef-dropzone">
+          <div class="dropzone-icon">📁</div>
+          <div class="dropzone-text">PDF oder Bild hierher ziehen oder klicken zum Auswählen</div>
+          <div class="dropzone-hint">Unterstützt: PDF (wird serverseitig in HD gerendert), PNG, JPG, WEBP</div>
+          <input type="file" id="input-overlay-file" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none;">
+        </div>
+
+        <div id="upload-progress-wrap" class="upload-progress-hidden">
+          <div class="upload-spinner"></div>
+          <span id="upload-status-text">Lade Datei hoch und bereite GPS-Verankerung vor...</span>
+        </div>
+
+        <div class="georef-existing-box">
+          <span class="existing-title">ODER AKTUELLEN PLAN NEU KALIBRIEREN:</span>
+          <button type="button" id="btn-recalibrate-current" class="btn btn-secondary">
+            📍 Aktuellen Plan neu verankern & justieren
+          </button>
+        </div>
+      </div>
+
+      <div class="modal-footer border-top">
+        <button type="button" id="btn-georef-modal-cancel" class="btn">ABBRECHEN</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/vendor/leaflet/leaflet.js" onerror="this.onerror=null;this.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';"></script>
+  <script src="/static/vendor/vis/vis-timeline-graph2d.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js';"></script>
+  
+  <!-- Taktische Hauptlogik -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
