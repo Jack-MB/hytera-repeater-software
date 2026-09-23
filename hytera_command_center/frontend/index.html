@@ -26,7 +26,7 @@
     }
     .map-overlay-tr { top: 12px; right: 12px; }
     .map-overlay-tl { top: 12px; left: 12px; }
-    .map-overlay-bl { bottom: 40px; left: 12px; max-width: 320px; }
+    .map-overlay-bl { bottom: 24px; left: 12px; max-width: 260px; }
 
     /* Karten-Toolbar */
     .map-toolbar {
@@ -37,6 +37,9 @@
       z-index: 1000;
       display: flex;
       gap: 6px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: calc(100% - 240px);
       background: var(--bg-panel);
       border: 1px solid var(--border-subtle);
       border-radius: var(--radius-xl);
@@ -173,6 +176,17 @@
       <span id="btn-replay-label">↺ Letzter Funkspruch</span>
     </button>
 
+    <div class="theme-switch-group" title="Anzeige-Modus (Dunkel / Sonnenlicht / Taktisches Rotlicht)">
+      <button class="theme-btn active" id="theme-btn-dark" onclick="setAppTheme('dark')" title="Dunkelmodus (Standard Leitstand)">🌙</button>
+      <button class="theme-btn" id="theme-btn-outdoor" onclick="setAppTheme('outdoor')" title="Outdoor-Sonnenlichtmodus (Hoher Kontrast)">☀️</button>
+      <button class="theme-btn" id="theme-btn-redlight" onclick="setAppTheme('redlight')" title="Taktisches Nacht-Rotlicht (Fahrzeug / Dunkelheit)">🚨</button>
+    </div>
+
+    <button id="btn-fullscreen-toggle" class="btn btn-sm btn-secondary" onclick="toggleFullscreen()" title="Vollbild umschalten (F11)" style="padding:4px 8px;font-size:13px;">⛶</button>
+    
+    <button id="btn-qr-modal-open" class="btn btn-sm btn-secondary" onclick="openQrModal()" title="Handy / Tablet per QR-Code koppeln" style="display:flex;align-items:center;gap:4px;padding:4px 8px;font-size:12px;">📱 QR</button>
+
+
     <div class="topbar-indicators">
       <div class="status-badge" id="badge-repeater" title="Repeater HR1065">
         <div class="dot"></div>
@@ -248,7 +262,21 @@
     </nav>
 
     <!-- ── Content Area ───────────────────────────── -->
-    <main id="content">
+    <main id="content" style="position:relative;">
+
+      <!-- 🚨 Globaler Sicherheitsalarm-Banner -->
+      <div id="security-alert-banner" class="security-alert-bar" style="display:none;">
+        <div class="security-alert-icon">🚨</div>
+        <div class="security-alert-text">
+          <div class="security-alert-title" id="sec-alert-title">SICHERHEITSALARM: Gesperrtes Funkgerät aktiv!</div>
+          <div class="security-alert-meta" id="sec-alert-meta">ID: — | Signalstärke: —</div>
+        </div>
+        <div class="security-alert-actions">
+          <button class="btn btn-xs btn-danger" onclick="locateBlockedRadio()">📍 Auf Karte orten</button>
+          <button class="btn btn-xs" style="background:#dc2626;color:white;" onclick="quickKnockdownFromAlert()">⛔ Relais stumm</button>
+          <button class="btn btn-xs" onclick="dismissSecurityAlert()">✕ Quittieren</button>
+        </div>
+      </div>
 
       <!-- ════ TAB: DASHBOARD ════ -->
       <div id="tab-dashboard" class="tab-panel active" style="overflow-y:auto; padding: var(--space-4); gap: var(--space-4);">
@@ -367,14 +395,26 @@
         <div id="map-container">
           <div id="map"></div>
 
+          <!-- Floating Status-Banner beim Zeichnen / Platzieren von Zonen -->
+          <div id="geofence-draw-banner" class="map-drawing-banner" style="display:none;">
+            <span id="geofence-draw-icon" style="font-size:16px;">⬡</span>
+            <span id="geofence-draw-text">Klicke auf die Karte...</span>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button class="btn btn-sm btn-primary" id="btn-finish-draw-geofence" style="display:none;padding:2px 8px;font-size:11px;" onclick="finishGeofenceDrawing()">✓ Fertigstellen</button>
+              <button class="btn btn-sm btn-secondary" id="btn-cancel-draw-geofence" style="padding:2px 8px;font-size:11px;" onclick="cancelGeofenceDrawing()">✕ Abbrechen</button>
+            </div>
+          </div>
+
           <!-- Karten-Toolbar -->
           <div class="map-toolbar">
             <button class="btn btn-sm" id="btn-map-center" title="Auf alle Einheiten zentrieren">⊙ Einheiten</button>
+            <button class="btn btn-sm" id="btn-map-my-location" onclick="centerOnMyLocation()" title="Meinen Browser-Standort (GPS) auf der Karte anzeigen">📍 Mein Standort</button>
             <button class="btn btn-sm" id="btn-toggle-breadcrumbs" title="Pfade ein/ausblenden">〰 Pfade</button>
             <button class="btn btn-sm" id="btn-toggle-labels" title="Funkrufnamen und Marker-Beschriftungen ein/ausblenden">🏷 Labels</button>
             <button class="btn btn-sm" id="btn-toggle-rssi" title="RSSI-Heatmap">📶 RSSI</button>
+            <button class="btn btn-sm" id="btn-map-cache-tiles" onclick="openTileCacheModal()" title="Aktuellen Kartenausschnitt für Offline-Nutzung vorladen">💾 Offline-Karten</button>
             <button class="btn btn-sm btn-danger" id="btn-add-marker" title="Marker setzen">＋ Marker</button>
-            <button class="btn btn-sm" id="btn-add-geofence" title="Geofence zeichnen">⬡ Zone</button>
+            <button class="btn btn-sm" id="btn-add-geofence" onclick="openAddGeofenceModal()" title="Taktische Zone / Geofence anlegen">⬡ Zone</button>
             <select class="form-select" id="map-floor-select" style="padding:4px 8px;font-size:12px;width:auto;">
               <option value="">Alle Ebenen</option>
               <option value="UG">UG</option>
@@ -385,10 +425,13 @@
             </select>
           </div>
 
-          <!-- Karten-Info-Box -->
-          <div class="map-overlay map-overlay-tr" style="padding: var(--space-3); min-width:200px;">
-            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;">AKTIVE EINHEITEN</div>
-            <div id="map-units-summary" style="font-size:12px; color:var(--text-secondary)">0 online</div>
+          <!-- Karten-Info-Box (Unten links, frei von Toolbar & Toasts) -->
+          <div class="map-overlay map-overlay-bl" style="padding: 6px 12px; min-width:130px; display:flex; align-items:center; gap:8px;">
+            <span style="font-size:14px;">📻</span>
+            <div>
+              <div style="font-size:9px;font-weight:700;color:var(--text-muted);letter-spacing:0.5px;">EINHEITEN</div>
+              <div id="map-units-summary" style="font-size:11px;font-weight:600;color:var(--text-primary)">0 online</div>
+            </div>
           </div>
         </div>
       </div>
@@ -398,7 +441,12 @@
         <div style="padding: var(--space-4); display:flex; flex-direction:column; gap: var(--space-4);">
           <div style="display:flex;align-items:center;justify-content:space-between;">
             <h3>Funkgeräte-Verwaltung</h3>
-            <div style="display:flex;gap:var(--space-2);">
+            <div style="display:flex;gap:var(--space-2);align-items:center;">
+              <select id="radios-filter-select" class="form-select" style="padding:4px 8px;font-size:12px;width:auto;" onchange="renderRadiosTable()">
+                <option value="all">Alle Geräte</option>
+                <option value="active">Nur Aktive / Entsperrte</option>
+                <option value="blocked">Nur Gesperrte / Verlorene (Blacklist)</option>
+              </select>
               <button class="btn btn-sm" id="btn-export-ids">⬇ ids.json</button>
               <button class="btn btn-primary btn-sm" id="btn-add-radio">＋ Gerät</button>
             </div>
@@ -425,8 +473,23 @@
       <!-- ════ TAB: SMS ════ -->
       <div id="tab-sms" class="tab-panel" style="flex-direction:row;">
         <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
-          <div style="padding:var(--space-3);border-bottom:1px solid var(--border-subtle);display:flex;gap:var(--space-2);">
-            <input type="number" id="sms-target-id" class="form-input" placeholder="Ziel-ID" style="width:120px">
+          <!-- BOS Schnellvorlagen -->
+          <div class="sms-quick-templates" style="padding:var(--space-2) var(--space-3);background:var(--bg-card);border-bottom:1px solid var(--border-subtle);display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <span style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-right:4px;">BOS-Status:</span>
+            <button class="sms-tpl-btn" data-text="Status 1 - Einsatzbereit Funk">1 Funk</button>
+            <button class="sms-tpl-btn" data-text="Status 2 - Wache">2 Wache</button>
+            <button class="sms-tpl-btn" data-text="Status 3 - Anfahrt Einsatz">3 Anfahrt</button>
+            <button class="sms-tpl-btn" data-text="Status 4 - Am Einsatzort">4 Am Ort</button>
+            <button class="sms-tpl-btn" data-text="Status 5 - Sprechwunsch">5 Sprechwunsch</button>
+            <button class="sms-tpl-btn" data-text="Status 6 - Nicht einsatzbereit">6 Nicht bereit</button>
+            <button class="sms-tpl-btn" style="color:var(--red);border-color:var(--red-border);" data-text="⚠️ SOFORTIGER RÜCKZUG ALLER TRUPPS!">🚨 RÜCKZUG</button>
+            <button class="sms-tpl-btn" data-text="Lagemeldung erbeten">Lagemeldung?</button>
+          </div>
+          <div style="padding:var(--space-3);border-bottom:1px solid var(--border-subtle);display:flex;gap:var(--space-2);align-items:center;">
+            <input type="number" id="sms-target-id" class="form-input" placeholder="Ziel-ID" style="width:110px">
+            <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap;" title="An alle Funkgeräte gleichzeitig senden (All-Call ID 16777215)">
+              <input type="checkbox" id="sms-broadcast-check" style="width:14px;height:14px;"> Rundruf
+            </label>
             <input type="text"   id="sms-text-input" class="form-input" placeholder="Nachricht eingeben..." style="flex:1">
             <button class="btn btn-primary" id="btn-send-sms">Senden ➤</button>
           </div>
@@ -499,7 +562,10 @@
 
           <!-- Geofences -->
           <div class="card">
-            <div class="card-header"><div class="card-title">⬡ Gefahrenzonen</div></div>
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+              <div class="card-title">⬡ Taktische Zonen</div>
+              <button class="btn btn-sm btn-primary" onclick="openAddGeofenceModal()" title="Neue Zone anlegen" style="padding:2px 8px;font-size:11px;">＋ Zone</button>
+            </div>
             <div style="overflow-y:auto;max-height:250px;"><div id="geofences-list"></div></div>
           </div>
         </div>
@@ -533,7 +599,11 @@
                   <span>⚡ Hytera HR1065 DMR-Repeater</span>
                   <span id="rpt-head-info" style="font-size:11px;color:var(--text-secondary);font-weight:400;"></span>
                 </div>
-                <span class="chip chip-offline" id="infra-repeater-chip">Offline</span>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <button id="btn-repeater-knockdown" class="btn btn-xs" style="background:#dc2626;color:white;font-weight:600;padding:2px 8px;font-size:11px;" onclick="toggleRepeaterKnockdownManual()" title="Repeater Sende-Relais stummschalten (Knockdown) / wieder aktivieren">⛔ Stummschalten</button>
+                  <span class="chip chip-online" id="rpt-repeating-badge" style="font-size:10px;">Repeating Aktiv</span>
+                  <span class="chip chip-offline" id="infra-repeater-chip">Offline</span>
+                </div>
               </div>
               <div class="infra-section-body">
                 <!-- Status & Kanalzeile -->
@@ -558,6 +628,12 @@
                   <div class="metric-card"><div class="metric-label">Signalstärke Slot 2</div><div class="metric-value" id="rpt-rssi2">—</div></div>
                 </div>
 
+                <!-- Netzwerk & HF-Rauschflur -->
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">LAN-Port (IF-MIB)</div><div class="metric-value info" id="rpt-lan-stats" style="font-size:12px">100 Mbit/s (0 Err)</div></div>
+                  <div class="metric-card"><div class="metric-label">Standby-Rauschflur</div><div class="metric-value" id="rpt-noise-floor" style="font-size:13px">— dBm</div></div>
+                </div>
+
                 <!-- Detail-Tabelle Identifikation & System -->
                 <div style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:var(--space-3);display:flex;flex-direction:column;gap:6px;">
                   <div class="infra-row"><span class="infra-key">Modell / Seriennr.:</span><span class="infra-val" id="rpt-model-sn">—</span></div>
@@ -568,7 +644,29 @@
                 </div>
 
                 <!-- Alarme & Schutzschaltungen -->
-                <div id="rpt-alarms" style="display:flex;flex-direction:column;gap:4px;"></div>
+                <div id="rpt-alarms" style="display:flex;flex-direction:column;gap:4px;margin-bottom:var(--space-3);"></div>
+
+                <!-- Repeater NVRAM Fehlerprotokoll -->
+                <div style="border-top:1px solid var(--border-color);padding-top:8px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">📜 Repeater-Fehlerlogbuch (NVRAM)</span>
+                    <span id="rpt-log-count-badge" class="chip" style="font-size:10px;">0 Einträge</span>
+                  </div>
+                  <div id="rpt-log-container" style="max-height:140px;overflow-y:auto;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-sm);font-size:11px;">
+                    <table style="width:100%;border-collapse:collapse;" id="rpt-log-table">
+                      <thead>
+                        <tr style="border-bottom:1px solid var(--border-color);color:var(--text-muted);text-align:left;">
+                          <th style="padding:4px 8px;">Uptime</th>
+                          <th style="padding:4px 8px;">Ereignis</th>
+                          <th style="padding:4px 8px;">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody id="rpt-log-tbody">
+                        <tr><td colspan="3" style="padding:8px;text-align:center;color:var(--text-muted);">Keine Fehler gespeichert</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -589,15 +687,30 @@
                   <div class="metric-card"><div class="metric-label">Last</div><div class="metric-value" id="ups-load">—</div></div>
                   <div class="metric-card"><div class="metric-label">Status</div><div class="metric-value" id="ups-status" style="font-size:13px">—</div></div>
                 </div>
+
+                <!-- Erweiterte elektrische Parameter -->
+                <div class="metric-grid cols-2" style="margin-bottom:var(--space-3);">
+                  <div class="metric-card"><div class="metric-label">Wirk- & Scheinleistung</div><div class="metric-value" id="ups-power-pwr" style="font-size:13px">— W / — VA</div></div>
+                  <div class="metric-card"><div class="metric-label">Leistungsfaktor (cos φ)</div><div class="metric-value info" id="ups-power-factor">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Energieverbrauch</div><div class="metric-value" id="ups-energy-kwh" style="font-size:13px">0.000 kWh</div></div>
+                  <div class="metric-card"><div class="metric-label">Akku-Gesundheit (SOH)</div><div class="metric-value good" id="ups-soh">100%</div></div>
+                  <div class="metric-card"><div class="metric-label">Netzausfälle / Akku-Zeit</div><div class="metric-value" id="ups-transfers" style="font-size:12px">0 Mal (0s)</div></div>
+                  <div class="metric-card"><div class="metric-label">Last-Segmente (1 / 2)</div><div class="metric-value info" id="ups-outlets" style="font-size:12px">Seg 1: Ein · Seg 2: Ein</div></div>
+                </div>
+
                 <div class="metric-grid cols-2">
                   <div class="metric-card"><div class="metric-label">Eingang V</div><div class="metric-value info" id="ups-in-volt">—</div></div>
                   <div class="metric-card"><div class="metric-label">Eingang Hz</div><div class="metric-value" id="ups-in-freq">—</div></div>
                   <div class="metric-card"><div class="metric-label">Ausgang V</div><div class="metric-value good" id="ups-out-volt">—</div></div>
-                  <div class="metric-card"><div class="metric-label">Ausgang W</div><div class="metric-value" id="ups-out-power">—</div></div>
                   <div class="metric-card"><div class="metric-label">Batt-Spannung</div><div class="metric-value" id="ups-batt-volt">—</div></div>
                   <div class="metric-card"><div class="metric-label">Innentemp</div><div class="metric-value" id="ups-temp">—</div></div>
+                  <div class="metric-card"><div class="metric-label">Bypass-Spannung</div><div class="metric-value" id="ups-bypass-volt" style="font-size:13px">— V</div></div>
                 </div>
-                <button class="btn btn-sm" id="btn-ups-scan" style="margin-top:var(--space-3)">🔬 Register-Scan</button>
+
+                <div style="display:flex;gap:8px;margin-top:var(--space-3);">
+                  <button class="btn btn-sm" id="btn-ups-scan">🔬 Register-Scan</button>
+                  <button class="btn btn-sm btn-secondary" id="btn-ups-reset-counters" title="Energie- und Netzausfallzähler für neuen Einsatz zurücksetzen">↺ Zähler nullen</button>
+                </div>
               </div>
             </div>
 
@@ -701,7 +814,34 @@
       <!-- ════ TAB: EINSTELLUNGEN ════ -->
       <div id="tab-settings" class="tab-panel" style="overflow-y:auto; padding: var(--space-4);">
         <div style="display:flex;flex-direction:column;gap:var(--space-4);max-width:700px;">
-          <h3>Systemeinstellungen</h3>
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <h3>Systemeinstellungen</h3>
+            <button class="btn btn-sm btn-primary" id="btn-scan-subnet" onclick="openSubnetScanModal()" title="Lokales Subnetz nach Repeater, USV und Routern scannen">🔎 Subnetz scannen</button>
+          </div>
+
+          <!-- Standort- & Netzwerk-Profile -->
+          <div class="card">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+              <div class="card-title">📍 Standort- & Netzwerk-Profile</div>
+              <span class="chip chip-online" id="current-profile-chip">Koffer / ELW</span>
+            </div>
+            <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+              <div style="display:flex;gap:var(--space-2);align-items:center;">
+                <label class="form-label" style="margin:0;white-space:nowrap;font-size:12px;">Profil wählen:</label>
+                <select id="cfg-profile-select" class="form-select" style="flex:1;">
+                  <option value="koffer">Einsatzkoffer / ELW (192.168.0.x)</option>
+                  <option value="wache">Wache / Gerätehaus (192.168.1.x)</option>
+                  <option value="hotspot">LTE-Hotspot / Mobilfunk (192.168.8.x)</option>
+                  <option value="mobil">Direkt-LAN / Fallback (192.168.178.x)</option>
+                </select>
+                <button class="btn btn-sm btn-primary" id="btn-apply-profile" onclick="applySelectedProfile()">Übernehmen</button>
+                <button class="btn btn-sm btn-secondary" id="btn-save-as-profile" onclick="saveCurrentAsProfile()">💾 Sichern</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);line-height:1.4;">
+                Profile passen Repeater-, USV- und Router-IPs für verschiedene Einsatzorte sofort an – ohne Neustart der Software!
+              </div>
+            </div>
+          </div>
 
           <!-- Hardware -->
           <div class="card">
@@ -804,8 +944,8 @@
 <div class="toast-container" id="toast-container"></div>
 
 <!-- Modal: Radio hinzufügen -->
-<div id="modal-add-radio" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:20000;align-items:center;justify-content:center;">
-  <div class="card" style="width:400px;max-width:90vw;">
+<div id="modal-add-radio" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:20000;align-items:center;justify-content:center;">
+  <div class="card" style="width:400px;max-width:90vw;max-height:90vh;overflow-y:auto;box-shadow:0 12px 32px rgba(0,0,0,0.8);">
     <div class="card-header">
       <div class="card-title">📻 Funkgerät hinzufügen</div>
       <button class="btn btn-sm" onclick="document.getElementById('modal-add-radio').style.display='none'">✕</button>
@@ -840,7 +980,7 @@
 
 <!-- Modal: Taktischen Marker hinzufügen -->
 <div id="modal-add-marker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:20000;align-items:center;justify-content:center;">
-  <div class="card" style="width:460px;max-width:92vw;box-shadow:0 12px 32px rgba(0,0,0,0.8);">
+  <div class="card" style="width:460px;max-width:92vw;max-height:90vh;overflow-y:auto;box-shadow:0 12px 32px rgba(0,0,0,0.8);">
     <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
       <div class="card-title">📍 Taktischen Marker setzen</div>
       <button class="btn btn-sm btn-icon" id="btn-close-add-marker" title="Schließen">✕</button>
@@ -926,6 +1066,145 @@
   </div>
 </div>
 
+<!-- Modal: Taktische Zone / Geofence anlegen -->
+<div id="modal-add-geofence" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:20000;align-items:center;justify-content:center;">
+  <div class="card" style="width:480px;max-width:94vw;max-height:90vh;overflow-y:auto;box-shadow:0 12px 32px rgba(0,0,0,0.8);">
+    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="card-title">⬡ Taktische Zone / Geofence anlegen</div>
+      <button class="btn btn-sm btn-icon" id="btn-close-add-geofence" title="Schließen" onclick="closeAddGeofenceModal()">✕</button>
+    </div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
+      
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Zonenbezeichnung</label>
+        <input type="text" id="new-geofence-name" class="form-input" placeholder="z. B. Gefahrenbereich Trümmerschatten, Einsatzabschnitt 1..." autofocus>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Zonentyp & Alarmierungslogik</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;" id="geofence-type-selector">
+          <div class="geofence-type-card active" data-type="danger" onclick="selectGeofenceType('danger')">
+            <div style="font-size:18px;">🚨</div>
+            <div>
+              <div style="font-weight:600;font-size:12px;color:var(--color-danger,#f85149)">Gefahrenzone</div>
+              <div style="font-size:10px;color:var(--text-muted)">Alarm bei Betreten (Rot)</div>
+            </div>
+          </div>
+          <div class="geofence-type-card" data-type="restricted" onclick="selectGeofenceType('restricted')">
+            <div style="font-size:18px;">⛔</div>
+            <div>
+              <div style="font-weight:600;font-size:12px;color:#a371f7">Sperrzone</div>
+              <div style="font-size:10px;color:var(--text-muted)">Alarm bei Betreten (Lila)</div>
+            </div>
+          </div>
+          <div class="geofence-type-card" data-type="operational" onclick="selectGeofenceType('operational')">
+            <div style="font-size:18px;">🔵</div>
+            <div>
+              <div style="font-weight:600;font-size:12px;color:#2f81f7">Einsatzabschnitt</div>
+              <div style="font-size:10px;color:var(--text-muted)">Alarm bei Verlassen (Blau)</div>
+            </div>
+          </div>
+          <div class="geofence-type-card" data-type="warning" onclick="selectGeofenceType('warning')">
+            <div style="font-size:18px;">⚠️</div>
+            <div>
+              <div style="font-weight:600;font-size:12px;color:#d29922">Warnbereich</div>
+              <div style="font-size:10px;color:var(--text-muted)">Hinweis bei Betreten (Gelb)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" style="font-size:11px;">Geometrische Form</label>
+        <div style="display:flex;gap:16px;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+            <input type="radio" name="geofence-shape" value="circle" checked onchange="toggleGeofenceShapeInputs('circle')">
+            <span>⭕ Kreis (Mittelpunkt + Radius)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+            <input type="radio" name="geofence-shape" value="polygon" onchange="toggleGeofenceShapeInputs('polygon')">
+            <span>⬡ Freiform (Vieleck / Polygon)</span>
+          </label>
+        </div>
+      </div>
+
+      <div id="geofence-circle-settings" class="form-group" style="display:flex;flex-direction:column;gap:6px;">
+        <label class="form-label" style="font-size:11px;">Radius (Meter)</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="number" id="new-geofence-radius" class="form-input mono" value="100" min="10" max="10000" step="10" style="width:110px;">
+          <div style="display:flex;gap:4px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-sm" onclick="setGeofenceRadiusPreset(25)" style="padding:2px 6px;font-size:11px;">25m</button>
+            <button type="button" class="btn btn-sm" onclick="setGeofenceRadiusPreset(50)" style="padding:2px 6px;font-size:11px;">50m</button>
+            <button type="button" class="btn btn-sm" onclick="setGeofenceRadiusPreset(100)" style="padding:2px 6px;font-size:11px;">100m</button>
+            <button type="button" class="btn btn-sm" onclick="setGeofenceRadiusPreset(250)" style="padding:2px 6px;font-size:11px;">250m</button>
+            <button type="button" class="btn btn-sm" onclick="setGeofenceRadiusPreset(500)" style="padding:2px 6px;font-size:11px;">500m</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="geofence-polygon-hint" class="form-group" style="display:none;background:rgba(47,129,247,0.1);border:1px solid rgba(47,129,247,0.25);border-radius:6px;padding:8px 12px;font-size:11px;color:var(--text-secondary);">
+        ℹ️ Beim Starten des Zeichenmodus klicken Sie die Eckpunkte der Zone nacheinander auf der Karte an (mindestens 3 Punkte).
+      </div>
+
+      <div style="display:flex;gap:var(--space-2);justify-content:flex-end;margin-top:var(--space-2);">
+        <button class="btn" onclick="closeAddGeofenceModal()">Abbrechen</button>
+        <button class="btn btn-primary" id="btn-start-draw-geofence" onclick="startGeofenceDrawing()">📍 Auf Karte zeichnen / platzieren</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ════ WEB-PTT DISPATCHER TRANSMITTER BAR ════ -->
+<div id="web-ptt-bar" class="ptt-bar">
+  <div class="ptt-bar-slot-group">
+    <label class="ptt-label" for="ptt-slot-select">Kanal:</label>
+    <select id="ptt-slot-select" class="form-select form-select-sm" style="width:75px;padding:3px 6px;font-size:12px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);">
+      <option value="TS1" selected>TS 1</option>
+      <option value="TS2">TS 2</option>
+    </select>
+  </div>
+  
+  <div class="ptt-bar-tg-group">
+    <label class="ptt-label" for="ptt-target-tg">Ziel-TG:</label>
+    <input type="number" id="ptt-target-tg" class="form-input form-input-sm" style="width:65px;padding:3px 6px;font-size:12px;font-family:var(--font-mono);background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);" value="1" min="1" max="16777215" title="Ziel-Talkgroup oder Einzelruf-ID">
+    <select id="ptt-calltype-select" class="form-select form-select-sm" onchange="onPttCallTypeSelectChange()" style="width:85px;padding:3px 6px;font-size:12px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);">
+      <option value="1" selected>Gruppe</option>
+      <option value="0">Einzel</option>
+      <option value="2">All-Call</option>
+    </select>
+  </div>
+
+  <div class="ptt-bar-button-container">
+    <button id="btn-web-ptt" class="btn-ptt" title="Gedrückt halten zum Sprechen (oder Leertaste halten)">
+      <span class="ptt-mic-icon">🎙️</span>
+      <span class="ptt-btn-text" id="ptt-btn-text">PTT SPRECHEN</span>
+      <span class="ptt-hotkey-hint">[Leertaste]</span>
+    </button>
+  </div>
+
+  <div class="ptt-bar-status">
+    <div class="ptt-vu-meter" id="ptt-vu-meter" title="Mikrofon-Pegel">
+      <div class="ptt-vu-bar" id="vu-bar-1"></div>
+      <div class="ptt-vu-bar" id="vu-bar-2"></div>
+      <div class="ptt-vu-bar" id="vu-bar-3"></div>
+      <div class="ptt-vu-bar" id="vu-bar-4"></div>
+      <div class="ptt-vu-bar" id="vu-bar-5"></div>
+    </div>
+    <div class="ptt-tx-timer" id="ptt-tx-timer">00:00</div>
+  </div>
+
+  <div class="ptt-bar-toggle" style="display:flex;align-items:center;gap:6px;">
+    <select id="ptt-audio-device-select" class="form-select form-select-sm" style="max-width:120px;padding:2px 4px;font-size:11px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);" title="Mikrofon-Eingabegerät">
+      <option value="">Standard-Mic</option>
+    </select>
+    <label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--text-secondary);cursor:pointer;" title="Akustischer Ton beim PTT-Start und Roger-Beep beim Loslassen">
+      <input type="checkbox" id="ptt-roger-beep" checked style="width:12px;height:12px;"> Roger
+    </label>
+    <button class="btn btn-xs btn-secondary" id="btn-ptt-mic-perm" style="font-size:11px;padding:3px 8px;" title="Mikrofon freigeben / prüfen">🎤 Mic</button>
+  </div>
+</div>
+
 <!-- ════ GLOBAL AUDIO PLAYER FLOATING BAR ════ -->
 <div id="global-audio-bar" class="audio-bar" style="display:none;">
   <div class="audio-bar-info">
@@ -953,6 +1232,138 @@
     <button class="btn btn-sm btn-icon" id="audio-close-btn" title="Schließen" style="margin-left:4px;">✕</button>
   </div>
   <audio id="global-audio-element" preload="auto"></audio>
+</div>
+
+<!-- ════ MODAL: QR-CODE SMARTPHONE CONNECT ════ -->
+<div id="modal-qr-connect" class="modal-overlay">
+  <div class="modal-dialog" style="width:420px;">
+    <div class="modal-header">
+      <div class="modal-title">📱 Smartphone / Tablet verbinden</div>
+      <button class="btn btn-sm btn-icon" onclick="closeQrModal()">✕</button>
+    </div>
+    <div class="modal-body" style="text-align:center;">
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">
+        Scannen Sie diesen QR-Code mit der Handy-Kamera, um das Command Center im gleichen WLAN/Netzwerk direkt mobil zu öffnen.
+      </div>
+      <div class="form-group" style="text-align:left;margin-bottom:12px;">
+        <label class="form-label" style="font-size:11px;">Netzwerk-Schnittstelle:</label>
+        <select id="qr-interface-select" class="form-select form-select-sm" onchange="reloadQrCode()">
+          <!-- Wird dynamisch mit IP-Adressen befüllt -->
+        </select>
+      </div>
+      <div class="qr-code-box" id="qr-code-container">
+        <!-- SVG QR Code here -->
+        <span style="color:var(--text-muted);font-size:12px;">Wird geladen...</span>
+      </div>
+      <div style="margin-top:12px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Direkt-URL im Fahrzeug / Koffer:</div>
+        <div style="display:flex;gap:6px;">
+          <input type="text" id="qr-direct-url" class="form-input mono" readonly style="font-size:12px;text-align:center;">
+          <button class="btn btn-sm btn-secondary" onclick="copyDirectUrl()" title="In die Zwischenablage kopieren">📋</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: SUBMETZ-AUTODISCOVERY SCANNER ════ -->
+<div id="modal-subnet-scan" class="modal-overlay">
+  <div class="modal-dialog" style="width:600px;">
+    <div class="modal-header">
+      <div class="modal-title">🔎 Subnetz-Autodiscovery Scanner</div>
+      <button class="btn btn-sm btn-icon" onclick="closeSubnetScanModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="scan-subnet-input" class="form-input mono" placeholder="192.168.0" style="width:140px;">
+        <button class="btn btn-primary" id="btn-start-subnet-scan" onclick="startSubnetScan()">Scan starten</button>
+        <span id="scan-status-text" style="font-size:12px;color:var(--text-secondary);flex:1;">Bereit zum Scannen</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);">
+        Prüft Port 161 (Hytera SNMP), 502 (Modbus USV) und Web-Ports 80/8043 (ZTE/Omada) im /24 Subnetz.
+      </div>
+      <div id="scan-results-list" style="margin-top:8px;max-height:300px;overflow-y:auto;">
+        <div style="text-align:center;color:var(--text-muted);padding:24px;font-size:12px;">Klicken Sie auf "Scan starten"</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: OFFLINE-KARTEN CACHE ════ -->
+<div id="modal-tile-cache" class="modal-overlay">
+  <div class="modal-dialog" style="width:480px;">
+    <div class="modal-header">
+      <div class="modal-title">💾 Offline-Karten Vorladen</div>
+      <button class="btn btn-sm btn-icon" onclick="closeTileCacheModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text-secondary);">
+        Lädt alle Karten-Kacheln (OpenStreetMap) für den aktuellen Kartenausschnitt vorab auf die lokale Festplatte herunter, damit die Lagekarte im Funkkoffer auch völlig ohne Internetverbindung nahtlos funktioniert.
+      </div>
+      <div class="form-group" style="margin-top:8px;">
+        <label class="form-label">Radius um Kartenmitte:</label>
+        <select id="tile-cache-radius" class="form-select">
+          <option value="2">2 km (Einsatzstelle lokal, ca. 200 Kacheln)</option>
+          <option value="5" selected>5 km (Ortsbereich, ca. 800 Kacheln)</option>
+          <option value="10">10 km (Gemeinde / Landkreis, ca. 2500 Kacheln)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Detaillierungsstufe (Zoom):</label>
+        <select id="tile-cache-zoom" class="form-select">
+          <option value="15">Bis Zoom 15 (Straßenübersicht)</option>
+          <option value="17" selected>Bis Zoom 17 (Gebäude- & Hausnummernebene)</option>
+        </select>
+      </div>
+      <div id="tile-cache-progress-box" style="display:none;background:var(--bg-card);padding:10px;border-radius:var(--radius-md);border:1px solid var(--border-subtle);">
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px;" id="tile-cache-status-label">Kacheln werden heruntergeladen...</div>
+        <div class="progress-bar"><div class="progress-fill" id="tile-cache-progress-bar" style="width:100%"></div></div>
+      </div>
+      <div id="tile-cache-info-box" style="font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;">
+        <span id="tile-cache-size-hint">Bereits im Cache: 0 Kacheln</span>
+        <button class="btn btn-xs btn-secondary" onclick="updateTileCacheStatus()">Aktualisieren</button>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
+        <button class="btn" onclick="closeTileCacheModal()">Abbrechen</button>
+        <button class="btn btn-primary" id="btn-do-cache-tiles" onclick="startTileDownload()">Jetzt Kacheln herunterladen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL: FUNKGERÄT SPERREN / BLACKLIST ════ -->
+<div id="modal-radio-block" class="modal-overlay">
+  <div class="modal-dialog" style="width:500px;">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-radio-block-title">🚫 Funkgerät sperren / Blacklist</div>
+      <button class="btn btn-sm btn-icon" onclick="closeRadioBlockModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-radio-block-info" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;"></div>
+      
+      <div id="block-reason-container" class="form-group">
+        <label class="form-label">Sperr-Grund / Anlass:</label>
+        <select id="radio-block-reason-select" class="form-select" onchange="onRadioBlockReasonChange()">
+          <option value="Verlust an Einsatzstelle">Verlust an Einsatzstelle / Im Feld verloren</option>
+          <option value="Diebstahl / Unbefugte Entnahme">Diebstahl / Unbefugte Entnahme</option>
+          <option value="Sabotage / Dauerträger-Störung">Sabotage / Dauerträger-Störung</option>
+          <option value="Defekt / Sendefehler">Technischer Defekt / Dauersenden</option>
+          <option value="custom">Sonstiger Grund (Freitext)...</option>
+        </select>
+        <input type="text" id="radio-block-reason-custom" class="form-input" placeholder="Begründung eingeben..." style="margin-top:6px;display:none;">
+      </div>
+
+      <div id="block-model-warning" style="display:none;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);padding:10px;border-radius:var(--radius-md);margin-top:8px;font-size:12px;color:var(--red);">
+        <strong>⚠️ Hinweis zu Retevis RT81:</strong> Dieses Gerät ignoriert Funk-Stun bauartbedingt. Das Funkgerät wird daher im Command Center gesperrt und löst bei jedem Sendeversuch sofort einen akustischen Sicherheitsalarm mit Live-Peilung/Ortung aus.
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn" onclick="closeRadioBlockModal()">Abbrechen</button>
+        <button class="btn btn-warning" id="btn-ota-stun" onclick="triggerOtaStunFromModal()" style="display:none;" title="Sendet DMR CSBK Radio Disable Frame an Ziel-ID">⚡ OTA-Stun senden</button>
+        <button class="btn btn-danger" id="btn-confirm-block" onclick="submitRadioBlock()">🚫 Jetzt sperren</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Scripts -->

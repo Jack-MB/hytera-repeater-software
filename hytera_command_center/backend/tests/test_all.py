@@ -9,6 +9,10 @@ Ausführung:
 
 import asyncio
 import struct
+import time
+import unittest
+import unittest.mock
+from unittest.mock import patch, MagicMock
 import pytest
 import pytest_asyncio
 import os
@@ -1325,6 +1329,1061 @@ class TestSNMPPollerAndMIB:
         # 3. Decode UTF-8
         raw8 = "Florian 1/11".encode("utf-8")
         assert decode_string_value(raw8) == "Florian 1/11"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-Suite: IP-TX-Transmitter & Web-PTT Integration
+# ─────────────────────────────────────────────────────────────────────────────
+class TestHyteraTxSender:
+    """Umfassende Tests für den Hytera IP-TX-Transmitter und Web-PTT."""
+
+    def test_rcp_call_setup_packet_structure(self):
+        from backend.protocol.tx_sender import build_rcp_call_setup
+        # Call Setup für TG 2428 (0x097C), Gruppenruf (1), Seq 1
+        pkt = build_rcp_call_setup(call_type=1, dest_id=2428, seq=1)
+        expected_hex = "3242000000010241080500017c0900005e03"
+        assert pkt.hex() == expected_hex
+        assert len(pkt) == 18
+
+    def test_rcp_button_request_press_and_release(self):
+        from backend.protocol.tx_sender import (
+            build_rcp_button_request,
+            BUTTON_TARGET_FRONT_PTT,
+            BUTTON_OP_PRESS,
+            BUTTON_OP_RELEASE,
+        )
+        # 1. PTT Press: Target 0x03, Op 0x01, Seq 0 -> Checksum 0xEB, Trailer 0x03
+        pkt_press = build_rcp_button_request(
+            target=BUTTON_TARGET_FRONT_PTT,
+            operation=BUTTON_OP_PRESS,
+            seq=0,
+        )
+        assert pkt_press.hex() == "32420000000002410002000301eb03"
+
+        # 2. PTT Release: Target 0x03, Op 0x00, Seq 0 -> Checksum 0xEC, Trailer 0x03
+        pkt_release = build_rcp_button_request(
+            target=BUTTON_TARGET_FRONT_PTT,
+            operation=BUTTON_OP_RELEASE,
+            seq=0,
+        )
+        assert pkt_release.hex() == "32420000000002410002000300ec03"
+
+    def test_rtp_voice_packet_format_and_extension(self):
+        from backend.protocol.tx_sender import build_rtp_voice_packet
+        silence = b'\xFF' * 160
+        pkt = build_rtp_voice_packet(silence, seq=123, timestamp=45600, ssrc=0x12345678)
+
+        # 12 Byte RTP Header + 16 Byte Hytera Extension + 160 Byte Payload = 188 Bytes
+        assert len(pkt) == 188
+        assert pkt[0] == 0x90  # V=2, Extension=1
+        assert pkt[1] == 0x00  # Payload Type = 0 (PCMU)
+        
+        # Sequenznummer (BE uint16)
+        seq_unpacked = struct.unpack_from('>H', pkt, 2)[0]
+        assert seq_unpacked == 123
+
+        # Timestamp (BE uint32)
+        ts_unpacked = struct.unpack_from('>I', pkt, 4)[0]
+        assert ts_unpacked == 45600
+
+        # Hytera Extension Profile & Length
+        assert pkt[12:16] == bytes.fromhex("00150003")
+
+    def test_pcm16_to_ulaw_conversion(self):
+        from backend.protocol.tx_sender import pcm16_to_ulaw
+        # 320 Bytes PCM16 (160 Samples Stille 0x0000)
+        pcm_zero = b'\x00\x00' * 160
+        ulaw = pcm16_to_ulaw(pcm_zero)
+        assert len(ulaw) == 160
+        # G.711 µ-law codiert 0 als 0xFF (invertiert)
+        assert ulaw[0] == 0xFF
+
+    def test_resample_pcm16_mono_from_48k_and_44k(self):
+        from backend.protocol.tx_sender import resample_pcm16_mono
+        # 1. 48000 Hz -> 8000 Hz: 480 Samples (10ms) -> 80 Samples (160 Bytes)
+        pcm_48k = struct.pack('<480h', *([1000] * 480))
+        res_8k = resample_pcm16_mono(pcm_48k, in_rate=48000, out_rate=8000)
+        assert len(res_8k) == 160  # 80 Samples * 2 Bytes
+
+        # 2. 44100 Hz -> 8000 Hz: 441 Samples -> 80 Samples (160 Bytes)
+        pcm_44k = struct.pack('<441h', *([1000] * 441))
+        res_44k = resample_pcm16_mono(pcm_44k, in_rate=44100, out_rate=8000)
+        assert len(res_44k) == 160
+
+    @pytest.mark.asyncio
+    async def test_hytera_tx_sender_lifecycle(self):
+        from backend.protocol.tx_sender import HyteraTxSender
+        sent_packets = []
+
+        def mock_udp_send(data: bytes, addr: tuple):
+            sent_packets.append((data, addr))
+
+        sender = HyteraTxSender(
+            repeater_ip="192.168.0.230",
+            send_udp_func=mock_udp_send,
+            tot_timeout_s=5.0,
+        )
+
+        assert sender.is_transmitting is False
+
+        # 1. Start TX
+        ok = await sender.start_tx(slot="TS1", target_id=99, call_type=1)
+        assert ok is True
+        assert sender.is_transmitting is True
+        assert sender.active_slot == "TS1"
+        assert sender.active_target_id == 99
+
+        # Mindestens Call Setup und Button Press müssen gesendet worden sein
+        assert len(sent_packets) >= 2
+        # Port muss 30009 für TS1 RCP sein
+        assert sent_packets[0][1][1] == 30009
+        assert sent_packets[1][1][1] == 30009
+
+        # 2. Audio einspeisen (48000 Hz Smartphone-Mic-Chunk)
+        mic_chunk = struct.pack('<960h', *([500] * 960))  # 20ms bei 48kHz
+        frames_added = sender.feed_pcm16_audio(mic_chunk, in_sample_rate=48000)
+        assert frames_added >= 1
+
+        # Status abfragen
+        status = sender.get_status()
+        assert status["is_transmitting"] is True
+        assert status["slot"] == "TS1"
+        assert status["target_id"] == 99
+
+        # 3. Stop TX
+        ok_stop = await sender.stop_tx()
+        assert ok_stop is True
+        assert sender.is_transmitting is False
+
+    @pytest.mark.asyncio
+    async def test_all_call_broadcast_target_id_override(self):
+        from backend.protocol.tx_sender import HyteraTxSender, CALL_TYPE_ALL
+        sent_packets = []
+        sender = HyteraTxSender(
+            repeater_ip="192.168.0.230",
+            send_udp_func=lambda data, addr: sent_packets.append((data, addr)),
+        )
+        # Wenn All-Call (Typ 2) gewählt wird, muss die Ziel-ID automatisch auf 16777215 (DMR Broadcast) gezwungen werden
+        ok = await sender.start_tx(slot="TS2", target_id=1, call_type=CALL_TYPE_ALL)
+        assert ok is True
+        assert sender.active_call_type == CALL_TYPE_ALL
+        assert sender.active_target_id == 16777215
+        assert sender.active_slot == "TS2"
+        await sender.stop_tx()
+
+    def test_tx_rest_api_flow(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Status vor TX
+            res = client.get("/api/tx/status")
+            assert res.status_code == 200
+            st = res.json()
+            assert "is_transmitting" in st
+
+            # 2. TX Starten
+            start_res = client.post("/api/tx/start", json={"slot": "TS2", "target_id": 2428, "call_type": 1})
+            assert start_res.status_code == 200
+            start_data = start_res.json()
+            assert start_data["success"] is True
+            assert start_data["status"]["is_transmitting"] is True
+            assert start_data["status"]["slot"] == "TS2"
+            assert start_data["status"]["target_id"] == 2428
+
+            # 3. Status prüfen
+            res_active = client.get("/api/tx/status")
+            assert res_active.status_code == 200
+            assert res_active.json()["is_transmitting"] is True
+
+            # 4. TX Stoppen
+            stop_res = client.post("/api/tx/stop")
+            assert stop_res.status_code == 200
+            stop_data = stop_res.json()
+            assert stop_data["success"] is True
+            assert stop_data["status"]["is_transmitting"] is False
+
+    def test_websocket_tx_audio_session(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/tx_audio") as ws:
+                # 1. PTT Drücken
+                ws.send_json({
+                    "action": "ptt_press",
+                    "slot": "TS1",
+                    "target_id": 1,
+                    "call_type": 1,
+                    "sample_rate": 48000,
+                })
+                ack = ws.receive_json()
+                assert ack["type"] == "ptt_ack"
+                assert ack["action"] == "press"
+                assert ack["success"] is True
+
+                # 2. Binäre Audio-Daten senden (z. B. 48 kHz PCM16 Block)
+                pcm_data = struct.pack('<480h', *([200] * 480))
+                ws.send_bytes(pcm_data)
+
+                # 3. PTT Loslassen
+                ws.send_json({"action": "ptt_release"})
+                ack2 = ws.receive_json()
+                assert ack2["type"] == "ptt_ack"
+                assert ack2["action"] == "release"
+                assert ack2["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_tot_watchdog_auto_cutoff(self):
+        from backend.protocol.tx_sender import HyteraTxSender
+        sender = HyteraTxSender(
+            repeater_ip="192.168.0.230",
+            send_udp_func=lambda data, addr: None,
+            tot_timeout_s=0.1,  # Sehr kurzes TOT für den Test
+        )
+        await sender.start_tx(slot="TS1", target_id=1, call_type=1)
+        assert sender.is_transmitting is True
+        # Warten bis TOT Watchdog greift
+        await asyncio.sleep(0.18)
+        assert sender.is_transmitting is False
+
+
+# ── Neue Tests: Erweiterte Repeater SNMP & USV Modbus Telemetrie ─────────────
+
+class TestRepeaterNewFeatures:
+    """Prüft die neuen Repeater-Funktionen: Knockdown, IF-MIB, Rauschflur, NVRAM-Log."""
+
+    @pytest.mark.asyncio
+    async def test_repeating_state_and_knockdown(self):
+        from backend.hardware.snmp_poller import (
+            HyteraSNMPPoller,
+            OID_RPT_REPEATING_STATE,
+            OID_RPT_RADIO_STATUS,
+        )
+        poller = HyteraSNMPPoller(repeater_ip="127.0.0.1")
+
+        # 1. Normalzustand (Repeating aktiv)
+        mock_pdu = {
+            OID_RPT_REPEATING_STATE: 0,
+            OID_RPT_RADIO_STATUS: 0,
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu):
+                st = await poller.poll_once()
+                assert st["repeating_enabled"] is True
+                assert st["radio_enabled"] is True
+                assert not any("unterdrückt" in w for w in st["warnings"])
+
+        # 2. Knockdown aktiv (Repeating gesperrt)
+        mock_pdu_knockdown = {
+            OID_RPT_REPEATING_STATE: 1,
+            OID_RPT_RADIO_STATUS: 0,
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu_knockdown):
+                st = await poller.poll_once()
+                assert st["repeating_enabled"] is False
+                assert any("unterdrückt" in w for w in st["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_hardware_model_no_and_band(self):
+        from backend.hardware.snmp_poller import (
+            HyteraSNMPPoller,
+            OID_RPT_MODEL_NO,
+            OID_RPT_FREQ_BAND,
+        )
+        poller = HyteraSNMPPoller(repeater_ip="127.0.0.1")
+        mock_pdu = {
+            OID_RPT_MODEL_NO: "HR1065-U1-50W",
+            OID_RPT_FREQ_BAND: "UHF 400-470 MHz",
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu):
+                st = await poller.poll_once()
+                assert st["model_no"] == "HR1065-U1-50W"
+                assert st["freq_band"] == "UHF 400-470 MHz"
+
+    @pytest.mark.asyncio
+    async def test_if_mib_network_telemetry(self):
+        from backend.hardware.snmp_poller import (
+            HyteraSNMPPoller,
+            OID_IF_SPEED,
+            OID_IF_OPER_STATUS,
+            OID_IF_IN_OCTETS,
+            OID_IF_OUT_OCTETS,
+            OID_IF_IN_ERRORS,
+            OID_IF_OUT_ERRORS,
+        )
+        poller = HyteraSNMPPoller(repeater_ip="127.0.0.1")
+
+        # Erster Poll: Basis-Werte & Octet-Initialisierung
+        mock_pdu_1 = {
+            OID_IF_SPEED: 100_000_000,
+            OID_IF_OPER_STATUS: 1,  # Up
+            OID_IF_IN_OCTETS: 1_000_000,
+            OID_IF_OUT_OCTETS: 2_000_000,
+            OID_IF_IN_ERRORS: 2,
+            OID_IF_OUT_ERRORS: 3,
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu_1):
+                st1 = await poller.poll_once()
+                assert st1["eth_speed_mbps"] == 100.0
+                assert st1["eth_oper_status"] == "Up"
+                assert st1["eth_in_errors"] == 2
+                assert st1["eth_out_errors"] == 3
+
+        # Zweiter Poll nach Zeitintervall mit Datendurchsatz
+        poller._prev_octets_ts = time.time() - 2.0  # 2 Sekunden vergangen
+        mock_pdu_2 = {
+            OID_IF_SPEED: 100_000_000,
+            OID_IF_OPER_STATUS: 1,
+            OID_IF_IN_OCTETS: 1_025_000,   # +25.000 Bytes in 2s = 100 kbit/s
+            OID_IF_OUT_OCTETS: 2_050_000,  # +50.000 Bytes in 2s = 200 kbit/s
+            OID_IF_IN_ERRORS: 2,
+            OID_IF_OUT_ERRORS: 3,
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu_2):
+                st2 = await poller.poll_once()
+                assert abs(st2["eth_in_kbps"] - 100.0) < 2.0
+                assert abs(st2["eth_out_kbps"] - 200.0) < 2.0
+
+    @pytest.mark.asyncio
+    async def test_standby_noise_floor_tracking(self):
+        from backend.hardware.snmp_poller import (
+            HyteraSNMPPoller,
+            OID_RPT_WORK_STATE,
+            OID_RPT_SLOT1_RSSI,
+        )
+        poller = HyteraSNMPPoller(repeater_ip="127.0.0.1")
+        mock_pdu = {
+            OID_RPT_WORK_STATE: 0,  # Standby
+            OID_RPT_SLOT1_RSSI: -112,
+        }
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", return_value=mock_pdu):
+                st = await poller.poll_once()
+                assert st["noise_floor_dbm"] == -112
+
+    @pytest.mark.asyncio
+    async def test_nvram_log_fetching(self):
+        from backend.hardware.snmp_poller import (
+            HyteraSNMPPoller,
+            BASE_RPT_LOG_TABLE,
+        )
+        poller = HyteraSNMPPoller(repeater_ip="127.0.0.1")
+        poller.state["log_count"] = 2
+        poller.state["log_latest"] = 5
+
+        # Simuliere PDU für Eintrag #5: Alarm 4 (VSWR), Status 1 (Aktiv), Uptime 3600
+        mock_log_pdu = {
+            f"{BASE_RPT_LOG_TABLE}.5.2.0": 4,
+            f"{BASE_RPT_LOG_TABLE}.5.3.0": 1,
+            f"{BASE_RPT_LOG_TABLE}.5.4.0": 3600,
+            f"{BASE_RPT_LOG_TABLE}.4.2.0": 1,
+            f"{BASE_RPT_LOG_TABLE}.4.3.0": 0,
+            f"{BASE_RPT_LOG_TABLE}.4.4.0": 1800,
+        }
+
+        with unittest.mock.patch.object(poller, "_send_and_receive", return_value=b"dummy"):
+            with unittest.mock.patch("backend.hardware.snmp_poller.parse_snmp_response_pdu", side_effect=lambda resp: mock_log_pdu):
+                logs = await poller.fetch_recent_logs(max_entries=2)
+                assert len(logs) >= 1
+                first = logs[0]
+                assert first["alarm_code"] == 4
+                assert first["status"] == "Aktiv"
+                assert first["is_active"] is True
+
+    def test_repeater_rest_endpoints(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            res_logs = client.get("/api/hardware/repeater/logs")
+            assert res_logs.status_code == 200
+            data_logs = res_logs.json()
+            assert data_logs["status"] == "ok"
+            assert "logs" in data_logs
+
+            res_net = client.get("/api/hardware/repeater/network")
+            assert res_net.status_code == 200
+            data_net = res_net.json()
+            assert data_net["status"] == "ok"
+            assert "speed_mbps" in data_net
+
+
+class TestUPSNewFeatures:
+    """Prüft die neuen USV-Funktionen: Scheinleistung VA, cos phi, Energie kWh, SOH, Segmente, Reset."""
+
+    def test_apparent_power_and_power_factor(self):
+        from backend.hardware.ups_modbus import (
+            _parse_registers,
+            REG_A_OUTPUT_POWER_VA,
+            REG_A_OUTPUT_POWER_W,
+        )
+        ra = [0] * 50
+        rb = [0] * 25
+        ra[REG_A_OUTPUT_POWER_VA] = 1000  # 1000 VA
+        ra[REG_A_OUTPUT_POWER_W]  = 800   # 800 W
+
+        state = _parse_registers(ra, rb)
+        assert state.output_power_va == 1000
+        assert state.output_power_w == 800
+        assert state.power_factor == 0.80
+
+    def test_outlet_load_groups(self):
+        from backend.hardware.ups_modbus import (
+            _parse_registers,
+            REG_B_OUTLET_1,
+            REG_B_OUTLET_2,
+        )
+        ra = [0] * 50
+        rb = [0] * 25
+        rb[REG_B_OUTLET_1] = 1  # Ein
+        rb[REG_B_OUTLET_2] = 0  # Aus
+
+        state = _parse_registers(ra, rb)
+        assert state.outlet_group_1 is True
+        assert state.outlet_group_2 is False
+
+    def test_soh_calculation(self):
+        from backend.hardware.ups_modbus import (
+            _parse_registers,
+            REG_B_FAULT,
+            REG_B_BATT_LOW,
+            REG_B_LOAD_PCT,
+        )
+        ra = [0] * 50
+        rb = [0] * 25
+
+        # Normalzustand: 100% SOH
+        st_norm = _parse_registers(ra, rb)
+        assert st_norm.battery_soh_pct == 100
+
+        # Fehlerzustand: SOH reduziert
+        rb_fault = list(rb)
+        rb_fault[REG_B_FAULT] = 1
+        st_fault = _parse_registers(ra, rb_fault)
+        assert st_fault.battery_soh_pct == 70
+
+        # Batt low bei niedriger Last
+        rb_low = list(rb)
+        rb_low[REG_B_BATT_LOW] = 1
+        rb_low[REG_B_LOAD_PCT] = 20
+        st_low = _parse_registers(ra, rb_low)
+        assert st_low.battery_soh_pct == 65
+
+    def test_energy_kwh_and_battery_transfer_integration(self):
+        from backend.hardware.ups_modbus import UPSMonitor, UPSState
+
+        monitor = UPSMonitor(host="127.0.0.1")
+
+        # 1. Simulierter Initial-Poll bei Netzbetrieb (1000W)
+        st1 = UPSState(online=True, netz_ok=True, output_power_w=1000)
+        with unittest.mock.patch("backend.hardware.ups_modbus._parse_registers", return_value=st1):
+            with unittest.mock.patch("pymodbus.client.ModbusTcpClient"):
+                res1 = monitor._poll_sync()
+                assert res1.energy_kwh == 0.0
+                assert res1.transfers_to_battery == 0
+
+        # 2. Simulierter zweiter Poll nach 36 Sekunden (0.01 Stunden) bei 1000W
+        # 1000W * 36s = 36000 Ws = 0.01 kWh
+        monitor._last_poll_time = time.time() - 36.0
+        st2 = UPSState(online=True, netz_ok=True, output_power_w=1000)
+        with unittest.mock.patch("backend.hardware.ups_modbus._parse_registers", return_value=st2):
+            with unittest.mock.patch("pymodbus.client.ModbusTcpClient"):
+                res2 = monitor._poll_sync()
+                assert abs(res2.energy_kwh - 0.01) < 0.002
+                assert res2.transfers_to_battery == 0
+
+        # 3. Simulierter Netzausfall: netz_ok wechselt von True auf False
+        monitor._last_poll_time = time.time() - 10.0
+        st3 = UPSState(online=True, netz_ok=False, output_power_w=500)
+        with unittest.mock.patch("backend.hardware.ups_modbus._parse_registers", return_value=st3):
+            with unittest.mock.patch("pymodbus.client.ModbusTcpClient"):
+                res3 = monitor._poll_sync()
+                assert res3.transfers_to_battery == 1
+
+        # 4. Nächster Poll während Akkubetrieb: total_battery_seconds steigt
+        monitor._last_poll_time = time.time() - 20.0
+        st4 = UPSState(online=True, netz_ok=False, output_power_w=500)
+        with unittest.mock.patch("backend.hardware.ups_modbus._parse_registers", return_value=st4):
+            with unittest.mock.patch("pymodbus.client.ModbusTcpClient"):
+                res4 = monitor._poll_sync()
+                assert res4.transfers_to_battery == 1
+                assert res4.total_battery_seconds >= 19.0
+
+        # 5. Reset Counters testen
+        monitor.reset_counters()
+        assert monitor._energy_kwh == 0.0
+        assert monitor._transfers_to_battery == 0
+        assert monitor._total_battery_seconds == 0.0
+
+    def test_ups_reset_counters_rest_endpoint(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            res = client.post("/api/hardware/ups/reset_counters")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "ok"
+            assert "zurückgesetzt" in data["message"]
+
+
+class TestFieldMobilityAndProfiles:
+    """Tests für Einsatzmobilität, Standort-Profile, Subnetz-Discovery, QR-Pairing und Offline-Karten."""
+
+    def test_network_profiles_lifecycle(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Profile abrufen
+            res = client.get("/api/system/profiles")
+            assert res.status_code == 200
+            data = res.json()
+            assert "profiles" in data
+            assert "koffer" in data["profiles"]
+            assert "wache" in data["profiles"]
+            assert data["active_profile"] in data["profiles"]
+
+            # 2. Profil 'wache' aktivieren
+            res = client.post("/api/system/profiles/apply", json={"profile_id": "wache"})
+            assert res.status_code == 200
+            app_data = res.json()
+            assert app_data["status"] == "ok"
+            assert app_data["applied_profile"] == "wache"
+            assert app_data["settings"]["repeater_ip"] == "192.168.1.230"
+
+            # 3. Neues individuelles Profil anlegen
+            new_profile = {
+                "id": "test_einsatz_wald",
+                "name": "Einsatzstelle Waldbrand",
+                "description": "Mobil-Repeater im Koffer",
+                "settings": {
+                    "repeater_ip": "10.42.0.230",
+                    "usv_ip": "10.42.0.232",
+                    "zte_ip": "10.42.0.1",
+                    "omada_ip": "10.42.0.1"
+                }
+            }
+            res = client.post("/api/system/profiles/save", json=new_profile)
+            assert res.status_code == 200
+            save_data = res.json()
+            assert save_data["status"] == "ok"
+            assert save_data["profile"]["name"] == "Einsatzstelle Waldbrand"
+
+            # 4. Überprüfen, dass Profil jetzt gelistet ist
+            res = client.get("/api/system/profiles")
+            assert "test_einsatz_wald" in res.json()["profiles"]
+
+            # 5. Individuelles Profil wieder löschen
+            res = client.delete("/api/system/profiles/test_einsatz_wald")
+            assert res.status_code == 200
+            assert res.json()["status"] == "ok"
+
+            # 6. Schutz vor Löschen von Standardprofilen
+            res = client.delete("/api/system/profiles/koffer")
+            assert res.status_code == 400
+
+    def test_network_interfaces_and_qr_code(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Interfaces auflisten
+            res = client.get("/api/system/network_interfaces")
+            assert res.status_code == 200
+            data = res.json()
+            assert "interfaces" in data
+            assert len(data["interfaces"]) > 0
+            assert "recommended_ip" in data
+
+            # 2. QR-Code als SVG abrufen
+            res = client.get("/api/system/qr_connect?ip=192.168.178.88")
+            assert res.status_code == 200
+            assert "image/svg+xml" in res.headers["content-type"]
+            svg_content = res.text
+            assert "<svg" in svg_content
+            assert "</svg>" in svg_content
+
+    def test_subnet_scanner_mocked(self):
+        import unittest.mock
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        from backend.hardware.subnet_scanner import DiscoveredDevice
+
+        mock_dev = DiscoveredDevice(
+            ip="192.168.0.230",
+            open_ports=[161],
+            type="repeater",
+            description="Hytera DMR Repeater (SNMP Port 161)"
+        )
+
+        with unittest.mock.patch("backend.hardware.subnet_scanner.SubnetScanner.scan_subnet") as mock_scan:
+            mock_scan.return_value = ([mock_dev], 0.45)
+
+            with TestClient(app) as client:
+                res = client.post("/api/hardware/scan_subnet", json={"subnet_prefix": "192.168.0"})
+                assert res.status_code == 200
+                data = res.json()
+                assert data["status"] == "ok"
+                assert data["count"] == 1
+                assert data["results"][0]["ip"] == "192.168.0.230"
+                assert data["results"][0]["type"] == "repeater"
+
+    def test_tile_cache_endpoints(self):
+        import unittest.mock
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # Cache Status
+            res = client.get("/api/map/cache_status")
+            assert res.status_code == 200
+            status = res.json()
+            assert "total_tiles_cached" in status
+            assert "total_size_mb" in status
+
+            # Cache Area mit Mock
+            with unittest.mock.patch("backend.utils.tile_cache.TileCacheManager.cache_area_by_radius") as mock_cache:
+                mock_cache.return_value = {
+                    "status": "ok",
+                    "total_needed": 100,
+                    "already_cached": 80,
+                    "downloaded": 20,
+                    "failed": 0
+                }
+                res = client.post("/api/map/cache_area", json={
+                    "lat": 52.5200,
+                    "lon": 13.4050,
+                    "radius_km": 2.0,
+                    "min_zoom": 12,
+                    "max_zoom": 14
+                })
+                assert res.status_code == 200
+                data = res.json()
+                assert data["status"] == "ok"
+                assert data["total_needed"] == 100
+                assert data["downloaded"] == 20
+
+    def test_sms_broadcast(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            res = client.post("/api/sms/broadcast", json={
+                "sender_id": 0,
+                "text": "ALARM: Alle Kräfte zum Sammelpunkt!"
+            })
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "ok"
+            assert data["target_id"] == 16777215
+            assert data["is_broadcast"] is True
+
+
+class TestRadioBlacklistAndSecurity:
+    """Tests für Funkgeräte-Blacklist, RT81-Sicherheitsalarm, OTA-Stun und Repeater-Knockdown."""
+
+    @pytest.mark.asyncio
+    async def test_radio_block_and_unblock_db(self, tmp_path):
+        db_path = str(tmp_path / "test_sec.db")
+        db = DatabaseManager(db_path)
+        await db.init_db()
+
+        # Funkgerät anlegen
+        await db.upsert_radio(2001, "Trupp RT81", device_model="Retevis RT81")
+        assert await db.is_radio_blocked(2001) is False
+
+        # Sperren
+        res = await db.set_radio_blocked(2001, is_blocked=True, reason="Verlust im Feld")
+        assert res is not None
+        assert bool(res["is_blocked"]) is True
+        assert await db.is_radio_blocked(2001) is True
+
+        # Blacklist abfragen
+        blocked_list = await db.get_blocked_radios()
+        assert len(blocked_list) == 1
+        assert blocked_list[0]["radio_id"] == 2001
+        assert blocked_list[0]["blocked_reason"] == "Verlust im Feld"
+        assert blocked_list[0]["blocked_at"] is not None
+
+        # In get_radios prüfen
+        all_radios = await db.get_radios()
+        r2001 = next(r for r in all_radios if r["radio_id"] == 2001)
+        assert r2001["is_blocked"] == 1
+        assert r2001["blocked_reason"] == "Verlust im Feld"
+
+        # Entsperren
+        await db.set_radio_blocked(2001, is_blocked=False)
+        assert await db.is_radio_blocked(2001) is False
+        blocked_after = await db.get_blocked_radios()
+        assert len(blocked_after) == 0
+
+    @pytest.mark.asyncio
+    async def test_rcp_radio_disable_packet_builder(self):
+        from backend.protocol.tx_sender import build_rcp_radio_disable, HyteraTxSender
+
+        pkt = build_rcp_radio_disable(dest_id=2001, seq=15)
+        assert len(pkt) == 18
+        # Header Check (HSTRP Signature b'2B\x00')
+        assert pkt[:3] == b"\x32\x42\x00"
+        # Opcode Check: RCP Opcode 0x0847 (little-endian: 0x47, 0x08)
+        assert pkt[7:9] == b"\x47\x08"
+        # Trailer Check
+        assert pkt[-1] == 0x03
+
+        # HyteraTxSender send_radio_disable mit gemocktem _send_packet
+        sender = HyteraTxSender("127.0.0.1", 30001, 100)
+        with unittest.mock.patch.object(sender, "_send_packet") as mock_send:
+            res = await sender.send_radio_disable(radio_id=2001)
+            assert res is True
+            assert mock_send.called
+            sent_pkt = mock_send.call_args[0][0]
+            assert sent_pkt[:3] == b"\x32\x42\x00"
+
+    def test_radio_block_and_ota_stun_endpoints(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Funkgerät anlegen (Retevis RT81)
+            client.post("/api/radios", json={
+                "radio_id": 4001,
+                "alias": "Angriffstrupp RT81",
+                "device_model": "Retevis RT81"
+            })
+
+            # 2. Funkgerät sperren
+            block_res = client.post("/api/radios/4001/block", json={
+                "is_blocked": True,
+                "reason": "Diebstahl / Unbefugte Entnahme"
+            })
+            assert block_res.status_code == 200
+            data = block_res.json()
+            assert data["status"] == "ok"
+            assert data["is_blocked"] is True
+            assert data["blocked_reason"] == "Diebstahl / Unbefugte Entnahme"
+
+            # 3. Blacklist abfragen
+            bl_res = client.get("/api/radios/blocked")
+            assert bl_res.status_code == 200
+            bl_data = bl_res.json()
+            assert any(r["radio_id"] == 4001 for r in bl_data["blocked_radios"])
+
+            # 4. OTA-Stun auf RT81 ausführen -> muss Warnhinweis liefern
+            stun_rt81 = client.post("/api/radios/4001/ota_stun")
+            assert stun_rt81.status_code == 200
+            stun_rt81_data = stun_rt81.json()
+            assert stun_rt81_data["status"] == "warning"
+            assert "Retevis RT81" in stun_rt81_data["message"]
+
+            # 5. Hytera Radio anlegen und OTA-Stun senden
+            client.post("/api/radios", json={
+                "radio_id": 4002,
+                "alias": "Hytera BP565 Führung",
+                "device_model": "Hytera BP565"
+            })
+            stun_hytera = client.post("/api/radios/4002/ota_stun")
+            assert stun_hytera.status_code == 200
+            stun_hytera_data = stun_hytera.json()
+            assert stun_hytera_data["status"] == "ok"
+            assert stun_hytera_data["is_blocked"] is True
+
+            # 6. Freigeben / Entsperren
+            unblock_res = client.post("/api/radios/4001/block", json={
+                "is_blocked": False
+            })
+            assert unblock_res.status_code == 200
+            assert unblock_res.json()["is_blocked"] is False
+
+    @pytest.mark.asyncio
+    async def test_security_alert_on_blocked_radio_transmission(self):
+        from backend.main import _broadcast_event, ws_manager, db_manager
+
+        # Radio anlegen und sperren
+        await db_manager.upsert_radio(5001, "Verlorenes Gerät", device_model="Retevis RT81")
+        await db_manager.set_radio_blocked(5001, is_blocked=True, reason="Im Innenangriff verloren")
+
+        broadcasted_events = []
+
+        async def mock_broadcast(msg):
+            broadcasted_events.append(msg)
+
+        with unittest.mock.patch.object(ws_manager, "broadcast", side_effect=mock_broadcast):
+            # Blockiertes Radio drückt PTT
+            ptt_event = {
+                "type": "ptt_start",
+                "radio_id": 5001,
+                "slot": 1,
+                "call_type": "group",
+                "rssi": -68.0
+            }
+            await _broadcast_event(ptt_event)
+
+            # Prüfen, ob Sicherheitsalarm getriggert wurde
+            sec_alerts = [e for e in broadcasted_events if e.get("type") == "security_alert"]
+            assert len(sec_alerts) == 1
+            alert = sec_alerts[0]
+            assert alert["alert_type"] == "blocked_radio_activity"
+            assert alert["radio_id"] == 5001
+            assert alert["blocked_reason"] == "Im Innenangriff verloren"
+            assert alert["rssi"] == -68.0
+
+        # Bereinigen
+        await db_manager.set_radio_blocked(5001, is_blocked=False)
+
+    def test_repeater_knockdown_endpoint(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Knockdown aktivieren (Stummschaltung)
+            res1 = client.post("/api/hardware/repeater/knockdown", json={"knockdown": True})
+            assert res1.status_code == 200
+            d1 = res1.json()
+            assert d1["knockdown"] is True
+            assert d1["repeating_state"] == 1
+
+            # 2. Knockdown deaktivieren (Normalbetrieb)
+            res2 = client.post("/api/hardware/repeater/knockdown", json={"knockdown": False})
+            assert res2.status_code == 200
+            d2 = res2.json()
+            assert d2["knockdown"] is False
+            assert d2["repeating_state"] == 0
+
+    def test_radio_fixed_position_api(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # Funkgerät anlegen (z.B. Feststation oder RT81 ohne GPS)
+            client.post("/api/radios", json={
+                "radio_id": 6001,
+                "alias": "Feststation ELW",
+                "device_model": "Hytera MD785G"
+            })
+
+            # Feste Position auf der Karte setzen
+            pos_res = client.put("/api/radios/6001/position", json={
+                "lat": 51.23456,
+                "lon": 6.78910
+            })
+            assert pos_res.status_code == 200
+            p_data = pos_res.json()
+            assert p_data["ok"] is True
+            assert p_data["fixed_lat"] == 51.23456
+            assert p_data["fixed_lon"] == 6.78910
+
+            # Funkgeräte abrufen und Festposition verifizieren
+            radios_res = client.get("/api/radios")
+            assert radios_res.status_code == 200
+            radios = radios_res.json()
+            r6001 = next(r for r in radios if r["radio_id"] == 6001)
+            assert r6001["fixed_lat"] == 51.23456
+            assert r6001["fixed_lon"] == 6.78910
+
+            # Feste Position wieder aufheben
+            clear_res = client.put("/api/radios/6001/position", json={
+                "lat": None,
+                "lon": None
+            })
+            assert clear_res.status_code == 200
+            assert clear_res.json()["ok"] is True
+            assert clear_res.json()["fixed_lat"] is None
+
+
+class TestGeofenceTacticalSystem:
+    """Umfassende Tests für Taktische Zonen, Geofencing & automatische Breacherkennung."""
+
+    def test_haversine_distance(self):
+        from backend.main import _haversine_distance_m
+        # Identische Punkte
+        assert _haversine_distance_m(52.5200, 13.4050, 52.5200, 13.4050) == 0.0
+
+        # Bekannte Distanz (ca. 111 km für 1 Breitengrad)
+        d = _haversine_distance_m(52.0, 13.0, 53.0, 13.0)
+        assert 111000 < d < 112000
+
+        # Kleine Distanz: ca. 11 Meter für 0.0001 Breitengrad
+        d_small = _haversine_distance_m(52.5200, 13.4050, 52.5201, 13.4050)
+        assert 10.0 < d_small < 12.0
+
+    def test_point_in_polygon(self):
+        from backend.main import _is_point_in_polygon
+        # Quadratisches Polygon um (51.0, 7.0)
+        poly = [
+            [51.0, 7.0],
+            [51.0, 7.1],
+            [51.1, 7.1],
+            [51.1, 7.0]
+        ]
+        # Innen liegender Punkt
+        assert _is_point_in_polygon(51.05, 7.05, poly) is True
+        # Außen liegender Punkt
+        assert _is_point_in_polygon(51.2, 7.2, poly) is False
+        assert _is_point_in_polygon(50.9, 7.05, poly) is False
+        # Ungültige Polygone (zu wenig Punkte)
+        assert _is_point_in_polygon(51.05, 7.05, [[51.0, 7.0], [51.1, 7.1]]) is False
+        assert _is_point_in_polygon(51.05, 7.05, []) is False
+
+    @pytest.mark.asyncio
+    async def test_geofence_db_crud(self):
+        from backend.db_manager import db_manager
+        # Kreis-Geofence einfügen
+        c_id = await db_manager.insert_geofence(
+            name="Gefahrenbereich Test",
+            zone_type="danger",
+            shape="circle",
+            center_lat=52.5200,
+            center_lon=13.4050,
+            radius_m=150.0
+        )
+        assert c_id > 0
+
+        # Polygon-Geofence einfügen
+        poly_coords = [[52.52, 13.40], [52.52, 13.41], [52.53, 13.41], [52.53, 13.40]]
+        p_id = await db_manager.insert_geofence(
+            name="Einsatzabschnitt Ost",
+            zone_type="operational",
+            shape="polygon",
+            polygon_coords=poly_coords
+        )
+        assert p_id > 0
+
+        # Abrufen
+        gfs = await db_manager.get_geofences()
+        c_item = next((g for g in gfs if g["id"] == c_id), None)
+        assert c_item is not None
+        assert c_item["name"] == "Gefahrenbereich Test"
+        assert c_item["zone_type"] == "danger"
+        assert c_item["shape"] == "circle"
+        assert c_item["center_lat"] == 52.5200
+        assert c_item["radius_m"] == 150.0
+
+        p_item = next((g for g in gfs if g["id"] == p_id), None)
+        assert p_item is not None
+        assert p_item["name"] == "Einsatzabschnitt Ost"
+        assert p_item["zone_type"] == "operational"
+        assert p_item["shape"] == "polygon"
+        assert len(p_item["polygon_coords"]) == 4
+
+        # Löschen
+        del_c = await db_manager.delete_geofence(c_id)
+        assert del_c is True
+        del_p = await db_manager.delete_geofence(p_id)
+        assert del_p is True
+
+    def test_geofence_api_flow(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        with TestClient(app) as client:
+            # POST: Neue Zone über API erstellen
+            create_res = client.post("/api/geofences", json={
+                "name": "Sperrzone Gefahrgut",
+                "zone_type": "restricted",
+                "shape": "circle",
+                "center_lat": 51.5000,
+                "center_lon": 7.5000,
+                "radius_m": 250.0
+            })
+            assert create_res.status_code == 200
+            data = create_res.json()
+            assert data["ok"] is True
+            gf_id = data["id"]
+            assert data["geofence"]["name"] == "Sperrzone Gefahrgut"
+
+            # GET: Alle Zonen abrufen
+            get_res = client.get("/api/geofences")
+            assert get_res.status_code == 200
+            zones = get_res.json()
+            found = next((z for z in zones if z["id"] == gf_id), None)
+            assert found is not None
+            assert found["zone_type"] == "restricted"
+
+            # DELETE: Zone löschen
+            del_res = client.delete(f"/api/geofences/{gf_id}")
+            assert del_res.status_code == 200
+            assert del_res.json()["ok"] is True
+
+            # Verifizieren, dass gelöscht
+            get_res2 = client.get("/api/geofences")
+            assert next((z for z in get_res2.json() if z["id"] == gf_id), None) is None
+
+    @pytest.mark.asyncio
+    async def test_geofence_breach_detection_enter_and_exit(self):
+        from backend.db_manager import db_manager
+        from backend.main import _check_geofence_breaches, _radio_zone_states, ws_manager
+
+        # Gefahrenzone anlegen: Zentrum (52.5200, 13.4050), Radius 100m
+        gf_id = await db_manager.insert_geofence(
+            name="Brandherd Zone A",
+            zone_type="danger",
+            shape="circle",
+            center_lat=52.5200,
+            center_lon=13.4050,
+            radius_m=100.0
+        )
+
+        test_radio_id = 9999
+        await db_manager.upsert_radio(test_radio_id, "Testfunkgerät 9999")
+
+        broadcast_events = []
+        original_broadcast = ws_manager.broadcast
+
+        async def mock_broadcast(msg):
+            broadcast_events.append(msg)
+
+        ws_manager.broadcast = mock_broadcast
+
+        try:
+            # 1. Radio ist weit außerhalb (ca. 10km nördlich)
+            await _check_geofence_breaches(test_radio_id, 52.6100, 13.4050)
+            assert len(broadcast_events) == 0
+            assert _radio_zone_states.get((test_radio_id, gf_id), False) is False
+
+            # 2. Radio betritt die Gefahrenzone (Zentrum + 20m)
+            await _check_geofence_breaches(test_radio_id, 52.5201, 13.4050)
+            assert len(broadcast_events) == 1
+            ev = broadcast_events[-1]
+            assert ev["type"] == "zone_breach"
+            assert ev["alert_type"] == "zone_enter"
+            assert ev["severity"] == "danger"
+            assert ev["zone_id"] == gf_id
+            assert ev["radio_id"] == test_radio_id
+            assert "GEFAHRENZONE" in ev["message"]
+            assert _radio_zone_states.get((test_radio_id, gf_id)) is True
+
+            # 3. Radio bleibt in der Zone (nächster GPS-Ping) -> KEIN erneuter Alarm!
+            await _check_geofence_breaches(test_radio_id, 52.5202, 13.4050)
+            assert len(broadcast_events) == 1  # Unverändert 1 Event
+
+            # 4. Radio verlässt die Zone wieder nach draußen
+            await _check_geofence_breaches(test_radio_id, 52.6100, 13.4050)
+            assert len(broadcast_events) == 2
+            exit_ev = broadcast_events[-1]
+            assert exit_ev["type"] == "zone_breach"
+            assert exit_ev["alert_type"] == "zone_exit"
+            assert exit_ev["zone_id"] == gf_id
+            assert _radio_zone_states.get((test_radio_id, gf_id)) is False
+
+        finally:
+            ws_manager.broadcast = original_broadcast
+            await db_manager.delete_geofence(gf_id)
+            keys_to_remove = [k for k in _radio_zone_states.keys() if k[1] == gf_id]
+            for k in keys_to_remove:
+                _radio_zone_states.pop(k, None)
+            assert (test_radio_id, gf_id) not in _radio_zone_states
+
+
+
+
+
+
+
 
 
 

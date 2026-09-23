@@ -1,0 +1,49 @@
+{
+  "active_profile": "wache",
+  "profiles": {
+    "koffer": {
+      "id": "koffer",
+      "name": "Einsatzkoffer / ELW",
+      "description": "Standard 192.168.0.x Subnetz (Mobilfunkkoffer)",
+      "settings": {
+        "repeater_ip": "192.168.0.230",
+        "usv_ip": "192.168.0.232",
+        "zte_ip": "192.168.0.1",
+        "omada_ip": "192.168.0.1"
+      }
+    },
+    "wache": {
+      "id": "wache",
+      "name": "Wache / Gerätehaus",
+      "description": "Stationäres Netzwerk 192.168.1.x",
+      "settings": {
+        "repeater_ip": "192.168.1.230",
+        "usv_ip": "192.168.1.232",
+        "zte_ip": "192.168.1.1",
+        "omada_ip": "192.168.1.1"
+      }
+    },
+    "hotspot": {
+      "id": "hotspot",
+      "name": "LTE-Hotspot / Mobilfunk",
+      "description": "Mobiler Router / Smartphone Hotspot 192.168.8.x",
+      "settings": {
+        "repeater_ip": "192.168.8.230",
+        "usv_ip": "192.168.8.232",
+        "zte_ip": "192.168.8.1",
+        "omada_ip": "192.168.8.1"
+      }
+    },
+    "mobil": {
+      "id": "mobil",
+      "name": "Direkt-LAN / Fallback",
+      "description": "Direktverbindung / FRITZ!Box 192.168.178.x",
+      "settings": {
+        "repeater_ip": "192.168.178.230",
+        "usv_ip": "192.168.178.232",
+        "zte_ip": "192.168.178.1",
+        "omada_ip": "192.168.178.1"
+      }
+    }
+  }
+}

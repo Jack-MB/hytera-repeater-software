@@ -48,10 +48,13 @@ const STATE = {
   mapMarkers:    {},   // radio_id → Leaflet marker
   mapPaths:      {},   // radio_id → Leaflet polyline
   mapPins:       {},   // DB marker id → Leaflet marker
-  mapGeofences:  [],   // Leaflet layers
+  mapGeofences:  {},   // zone_id → Leaflet layer
   tileLayer:     null,
   unreadSMS:     0,
   emergencyCount: 0,
+  drawingGeofence: null,       // Aktive Zonen-Zeichenkonfiguration
+  tempGeofenceLayers: [],      // Temporäre Marker/Linien beim Zeichnen
+  selectedGeofenceType: "danger",
   // Hardware-Status (letzter bekannter Zustand)
   hw: {
     ups:     null,
@@ -63,6 +66,9 @@ const STATE = {
   alarmAudioCtx: null,
   alarmActive:   false,
   loneWorkerTimers: {}, // radio_id → timer
+  lastBlockedAlertRadio: null,
+  modalTargetRadioId: null,
+  settingRadioPositionId: null,
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -200,6 +206,10 @@ function handleEvent(msg) {
       onAudioReady(msg);
       break;
 
+    case "tx_state_changed":
+      onTxStateChanged(msg);
+      break;
+
     case "marker_added":
       onMarkerAdded(msg.marker);
       break;
@@ -224,19 +234,63 @@ function handleEvent(msg) {
       }
       break;
 
-    case "geofence_added":
-      STATE.geofences.push(msg.geofence);
+    case "geofence_added": {
+      const existingIdx = STATE.geofences.findIndex(g => g.id === msg.geofence.id);
+      if (existingIdx >= 0) {
+        STATE.geofences[existingIdx] = msg.geofence;
+      } else {
+        STATE.geofences.unshift(msg.geofence);
+      }
       drawGeofenceOnMap(msg.geofence);
       renderGeofencesList();
       break;
+    }
 
-    case "geofence_deleted":
+    case "geofence_deleted": {
+      if (STATE.mapGeofences && STATE.mapGeofences[msg.id]) {
+        STATE.map?.removeLayer(STATE.mapGeofences[msg.id]);
+        delete STATE.mapGeofences[msg.id];
+      }
       STATE.geofences = STATE.geofences.filter(g => g.id !== msg.id);
       renderGeofencesList();
+      break;
+    }
+
+    case "zone_breach":
+      onZoneBreach(msg);
       break;
 
     case "system_status":
       updatePortStats(msg.port_stats || []);
+      break;
+
+    case "security_alert":
+      onSecurityAlert(msg);
+      break;
+
+    case "radio_block_update":
+      onRadioBlockUpdate(msg);
+      break;
+
+    case "repeater_knockdown_changed":
+      onRepeaterKnockdownChanged(msg);
+      break;
+
+    case "radio_position_cleared":
+      if (STATE.radios[msg.radio_id]) {
+        STATE.radios[msg.radio_id].fixed_lat = null;
+        STATE.radios[msg.radio_id].fixed_lon = null;
+        STATE.radios[msg.radio_id].last_lat = null;
+        STATE.radios[msg.radio_id].last_lon = null;
+      }
+      if (STATE.gpsPositions[msg.radio_id]?.is_fixed) {
+        delete STATE.gpsPositions[msg.radio_id];
+        if (STATE.mapMarkers[msg.radio_id]) {
+          STATE.map?.removeLayer(STATE.mapMarkers[msg.radio_id]);
+          delete STATE.mapMarkers[msg.radio_id];
+        }
+      }
+      renderRadiosTable();
       break;
 
     case "system_reset":
@@ -279,6 +333,20 @@ function initFromState(msg) {
     STATE.gpsPositions[g.radio_id] = g;
   });
 
+  // Feste Positionen für Funkgeräte ohne Live-GPS einbinden
+  (msg.radios || []).forEach(r => {
+    if (r.fixed_lat != null && r.fixed_lon != null && !STATE.gpsPositions[r.radio_id]) {
+      STATE.gpsPositions[r.radio_id] = {
+        radio_id: r.radio_id,
+        lat: r.fixed_lat,
+        lon: r.fixed_lon,
+        rssi: r.last_rssi,
+        is_fixed: true,
+        timestamp: new Date().toISOString()
+      };
+    }
+  });
+
   // Calls
   STATE.calls = msg.calls || [];
 
@@ -289,6 +357,9 @@ function initFromState(msg) {
   (msg.markers || []).forEach(m => {
     STATE.markers[m.id] = m;
   });
+
+  // Geofences
+  STATE.geofences = msg.geofences || [];
 
   // Settings
   STATE.settings = msg.settings || {};
@@ -614,8 +685,10 @@ function onRepeaterUpdate(msg) {
 
   // Geräte-Details
   const modelText = s.model_name || "Hytera HR1065";
-  const snText = (s.serial_number && s.serial_number !== "—") ? ` (SN: ${s.serial_number})` : "";
-  setText("rpt-model-sn", `${modelText}${snText}`);
+  const modelNo = s.model_no ? ` [${s.model_no}]` : "";
+  const bandText = s.freq_band ? ` (${s.freq_band})` : "";
+  const snText = (s.serial_number && s.serial_number !== "—") ? ` · SN: ${s.serial_number}` : "";
+  setText("rpt-model-sn", `${modelText}${modelNo}${bandText}${snText}`);
 
   const fwText = (s.firmware_version && s.firmware_version !== "—") ? s.firmware_version : "—";
   const rcdbText = (s.rcdb_version && s.rcdb_version !== "—") ? ` | RCDB: ${s.rcdb_version}` : "";
@@ -629,9 +702,39 @@ function onRepeaterUpdate(msg) {
 
   setText("rpt-uptime", s.uptime_str || "—");
 
+  // Repeating & Knockdown Status-Badge & Control Button
+  const isRepeating = s.repeating_enabled !== false && s.repeating_state !== 1;
+  const repBadge = document.getElementById("rpt-repeating-badge");
+  if (repBadge) {
+    repBadge.textContent = isRepeating ? "Repeating Aktiv" : "Repeating Unterdrückt";
+    repBadge.className = `chip ${isRepeating ? "chip-online" : "chip-warning"}`;
+  }
+  STATE.repeaterKnockdown = !isRepeating;
+  updateRepeaterKnockdownButton(!isRepeating);
+
+  // LAN-Port IF-MIB Stats
+  const speed = s.eth_speed_mbps || 100;
+  const oper = s.eth_oper_status || (isOnline ? "Up" : "—");
+  const errs = (s.eth_in_errors || 0) + (s.eth_out_errors || 0);
+  const lanText = isOnline ? `${speed} Mbit/s (${oper}) · ${errs} Err` : "—";
+  setText("rpt-lan-stats", lanText);
+
+  // Standby-Rauschflur
+  const nfText = s.noise_floor_dbm != null ? `${s.noise_floor_dbm} dBm` : "— dBm";
+  setText("rpt-noise-floor", nfText);
+
   // Trap-Counter
   setText("rpt-trap-count",  s.trap_count  != null ? String(s.trap_count)  : "0");
   setText("rpt-alarm-count", s.alarm_count != null ? String(s.alarm_count) : "0");
+
+  // NVRAM Logbuch
+  if (s.log_count != null || (s.recent_logs && s.recent_logs.length > 0)) {
+    const count = s.log_count != null ? s.log_count : s.recent_logs.length;
+    setText("rpt-log-count-badge", `${count} Einträge`);
+    if (s.recent_logs && s.recent_logs.length > 0) {
+      renderRepeaterLogs(s.recent_logs);
+    }
+  }
 
   // Alarm-Flags & Warnungen
   const alarmsEl = document.getElementById("rpt-alarms");
@@ -652,6 +755,37 @@ function onRepeaterUpdate(msg) {
     } else {
       alarmsEl.innerHTML = '<div class="chip chip-offline">Keine Verbindung zum Repeater</div>';
     }
+  }
+}
+
+function renderRepeaterLogs(logs) {
+  const tbody = document.getElementById("rpt-log-tbody");
+  if (!tbody) return;
+  if (!logs || logs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" style="padding:8px;text-align:center;color:var(--text-muted);">Keine Fehler im NVRAM gespeichert</td></tr>';
+    return;
+  }
+  tbody.innerHTML = logs.map(l => {
+    const badgeClass = l.is_active ? "chip-emergency" : "chip-online";
+    return `<tr style="border-bottom:1px solid var(--border-color);font-size:11px;">
+      <td style="padding:4px 8px;font-family:var(--font-mono);">${escapeHTML(l.time_str || (l.uptime_s + 's'))}</td>
+      <td style="padding:4px 8px;font-weight:500;">${escapeHTML(l.alarm_name || ('Code #' + l.alarm_code))}</td>
+      <td style="padding:4px 8px;"><span class="chip ${badgeClass}" style="font-size:9px;padding:2px 6px;">${escapeHTML(l.status)}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadRepeaterLogs() {
+  try {
+    const res = await fetch("/api/hardware/repeater/logs?count=15");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.status === "ok" && Array.isArray(data.logs)) {
+      renderRepeaterLogs(data.logs);
+      setText("rpt-log-count-badge", `${data.logs.length} Einträge`);
+    }
+  } catch (e) {
+    console.warn("Fehler beim Laden der Repeater-Logs:", e);
   }
 }
 
@@ -699,12 +833,18 @@ function onUPSUpdate(msg) {
 
   // Batterie-Temperatur Warnung
   if ((d.batt_temp_c || 0) > 35) {
-    showToast("\u26a0 USV Batterietemperatur", `${d.batt_temp_c} \u00b0C \u2013 \u00fcberpriifen!`, "warning");
+    showToast("⚠ USV Batterietemperatur", `${d.batt_temp_c} °C – überprüfen!`, "warning");
+  }
+
+  // USV Restlaufzeit-Warnung (<15 min auf Batterie)
+  if (onBatt && d.batt_runtime_min != null && d.batt_runtime_min < 15) {
+    showToast("🚨 USV-RESTLAUFZEIT KRITISCH!", `Akkubetrieb! Nur noch ${d.batt_runtime_min} Minuten verbleibend! Stromversorgung wiederherstellen!`, "emergency", 8000);
+    playAlarmSound();
   }
 
   // Fault-Alarm
   if (d.fault_active && d.fault_code) {
-    showToast("\u26a0 USV Fehler", `Fehlercode: ${d.fault_code}`, "emergency");
+    showToast("⚠ USV Fehler", `Fehlercode: ${d.fault_code}`, "emergency");
   }
 
   // ── Dashboard
@@ -725,20 +865,44 @@ function onUPSUpdate(msg) {
   setText("ups-in-curr",   d.input_curr != null  ? `${d.input_curr} A`   : "\u2014");
 
   // Ausgang
-  setText("ups-out-volt",  d.output_volt     != null ? `${d.output_volt} V`      : "\u2014");
-  setText("ups-out-freq",  d.output_freq     != null ? `${d.output_freq} Hz`     : "\u2014");
-  setText("ups-out-curr",  d.output_curr     != null ? `${d.output_curr} A`      : "\u2014");
-  setText("ups-out-power", d.output_power_w  != null ? `${d.output_power_w} W`  : "\u2014");
+  setText("ups-out-volt",  d.output_volt     != null ? `${d.output_volt} V`      : "—");
+  setText("ups-out-freq",  d.output_freq     != null ? `${d.output_freq} Hz`     : "—");
+  setText("ups-out-curr",  d.output_curr     != null ? `${d.output_curr} A`      : "—");
+  setText("ups-out-power", d.output_power_w  != null ? `${d.output_power_w} W`  : "—");
+
+  // Erweiterte elektrische Leistung & Energie
+  const pwrW = d.output_power_w != null ? `${d.output_power_w} W` : "— W";
+  const pwrVA = d.output_power_va != null ? `${d.output_power_va} VA` : "— VA";
+  setText("ups-power-pwr", `${pwrW} / ${pwrVA}`);
+  setText("ups-power-factor", d.power_factor != null ? d.power_factor.toFixed(2) : "—");
+  setText("ups-energy-kwh", d.energy_kwh != null ? `${Number(d.energy_kwh).toFixed(3)} kWh` : "0.000 kWh");
+
+  // Akku-Gesundheit (SOH)
+  const soh = d.battery_soh_pct ?? 100;
+  setText("ups-soh", `${soh}%`);
+  colorizeMetric("ups-soh", soh, [[60, "danger"], [80, "warn"], [100, "good"]]);
+
+  // Netzausfälle & Akkulaufzeit
+  const transfers = d.transfers_to_battery ?? 0;
+  const battSecs = Math.round(d.total_battery_seconds || 0);
+  const battDurStr = battSecs < 60 ? `${battSecs}s` : formatUptime(battSecs);
+  setText("ups-transfers", `${transfers} Mal (${battDurStr})`);
+
+  // Last-Segmente (1 / 2)
+  const o1 = d.outlet_group_1 !== false ? "Ein" : "Aus";
+  const o2 = d.outlet_group_2 !== false ? "Ein" : "Aus";
+  setText("ups-outlets", `Seg 1: ${o1} · Seg 2: ${o2}`);
 
   // Batterie
-  setText("ups-batt-volt", d.batt_volt_v    != null ? `${d.batt_volt_v} V`      : "\u2014");
-  setText("ups-batt-curr", d.batt_curr_a    != null ? `${d.batt_curr_a} A`      : "\u2014");
-  setText("ups-batt-temp", d.batt_temp_c    != null ? `${d.batt_temp_c} \u00b0C`     : "\u2014");
+  setText("ups-batt-volt", d.batt_volt_v    != null ? `${d.batt_volt_v} V`      : "—");
+  setText("ups-batt-curr", d.batt_curr_a    != null ? `${d.batt_curr_a} A`      : "—");
+  setText("ups-batt-temp", d.batt_temp_c    != null ? `${d.batt_temp_c} °C`     : "—");
 
-  // Intern
-  setText("ups-temp",      d.internal_temp_c != null ? `${d.internal_temp_c} \u00b0C` : "\u2014");
-  setText("ups-bypass",    d.bypass_active   === true ? "Aktiv" : "Inaktiv");
-  setText("ups-fault-code",d.fault_code      != null ? String(d.fault_code) : "\u2014");
+  // Intern & Bypass
+  setText("ups-temp",        d.internal_temp_c != null ? `${d.internal_temp_c} °C` : "—");
+  setText("ups-bypass",      d.bypass_active   === true ? "Aktiv" : "Inaktiv");
+  setText("ups-bypass-volt", d.bypass_volt     != null ? `${d.bypass_volt.toFixed(1)} V` : "— V");
+  setText("ups-fault-code",  d.fault_code      != null ? String(d.fault_code) : "—");
 
   // Farb-Kodierungen
   colorizeMetric("ups-batt-pct",  pct,                    [[20, "danger"], [40, "warn"], [100, "good"]]);
@@ -896,11 +1060,24 @@ function initMap() {
   });
   document.getElementById("btn-toggle-rssi")?.addEventListener("click", toggleRSSILayer);
 
-  // Karten-Klick → Marker setzen wenn Marker-Modus aktiv
+  // Karten-Klick → Feste Radio-Position, Marker setzen oder Zone zeichnen
   map.on("click", e => {
+    if (STATE.settingRadioPositionId) {
+      const rid = STATE.settingRadioPositionId;
+      STATE.settingRadioPositionId = null;
+      const mapEl = document.getElementById("map");
+      if (mapEl) mapEl.style.cursor = "";
+      saveRadioFixedPosition(rid, e.latlng.lat, e.latlng.lng);
+      return;
+    }
     if (STATE.addingMarker) {
       setMarkerMode(false);
       openMarkerModal(e.latlng.lat, e.latlng.lng);
+      return;
+    }
+    if (STATE.drawingGeofence) {
+      handleGeofenceMapClick(e.latlng);
+      return;
     }
   });
 
@@ -1077,11 +1254,15 @@ function buildRadioPopup(rid) {
   const gps   = STATE.gpsPositions[rid] || {};
   const ptt   = STATE.activePTTs[rid];
   const em    = STATE.emergencies[rid];
+  const isFixed = Boolean(radio.fixed_lat != null || gps.is_fixed);
 
   let statusBadge = `<span class="t-popup-badge prio-normal">Online</span>`;
   if (em) statusBadge = `<span class="t-popup-badge prio-critical">🚨 Notruf</span>`;
   else if (ptt) statusBadge = `<span class="t-popup-badge prio-high">🎙 PTT</span>`;
   else if (!radio.online && radio.online !== undefined) statusBadge = `<span class="t-popup-badge prio-low">Offline</span>`;
+  if (isFixed) {
+    statusBadge += ` <span class="t-popup-badge" style="background:rgba(59,130,246,0.2);color:var(--blue-400);border:1px solid rgba(59,130,246,0.3)">📌 Fest</span>`;
+  }
 
   const coords = (gps.lat && gps.lon) ? `${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}` : "–";
   const speedStr = gps.speed != null ? `${gps.speed.toFixed(1)} km/h` : "–";
@@ -1100,13 +1281,15 @@ function buildRadioPopup(rid) {
       <div class="t-popup-rows">
         <div class="t-popup-row"><span class="t-key">DMR-ID</span><span class="t-val">${rid}</span></div>
         <div class="t-popup-row"><span class="t-key">Gerät</span><span class="t-val">${escapeHTML(radio.device_model || "Hytera")}</span></div>
-        <div class="t-popup-row"><span class="t-key">Position</span><span class="t-val">${coords}</span></div>
+        <div class="t-popup-row"><span class="t-key">Position</span><span class="t-val">${coords}${isFixed ? ' (Fest)' : ''}</span></div>
         <div class="t-popup-row"><span class="t-key">Geschw. / Kurs</span><span class="t-val">${speedStr} · ${headingStr}</span></div>
         <div class="t-popup-row"><span class="t-key">Signal (RSSI)</span><span class="t-val">${rssiStr}</span></div>
       </div>
-      <div class="t-popup-actions">
+      <div class="t-popup-actions" style="display:flex;gap:4px;flex-wrap:wrap;">
         ${em ? `<button class="btn btn-sm btn-danger" onclick="ackEmergency(${rid})" style="flex:1;padding:3px 6px;font-size:11px;">✓ Quittieren</button>` : ""}
         <button class="btn btn-sm btn-secondary" onclick="focusOnMap(${rid})" style="flex:1;padding:3px 6px;font-size:11px;">⊙ Zentrieren</button>
+        <button class="btn btn-sm" onclick="startSetRadioPosition(${rid})" style="flex:1;padding:3px 6px;font-size:11px;" title="Feste Position auf Karte platzieren / anpassen">📍 Pos. anpassen</button>
+        ${radio.fixed_lat != null ? `<button class="btn btn-sm btn-icon" onclick="clearRadioFixedPosition(${rid})" style="color:var(--text-muted);padding:3px 6px;font-size:11px;" title="Feste Position entfernen">✕</button>` : ""}
       </div>
     </div>`;
 }
@@ -1227,17 +1410,88 @@ function onMarkerDeleted(id) {
 }
 
 function drawGeofenceOnMap(gf) {
-  if (!STATE.map) return;
-  let layer;
-  if (gf.shape === "circle" && gf.center_lat != null) {
-    const color = gf.zone_type === "danger" ? "#f85149" : "#2f81f7";
+  if (!STATE.map || !gf) return;
+  if (!STATE.mapGeofences) STATE.mapGeofences = {};
+
+  // Vorherigen Layer dieser Zone entfernen falls vorhanden
+  if (STATE.mapGeofences[gf.id]) {
+    STATE.map.removeLayer(STATE.mapGeofences[gf.id]);
+    delete STATE.mapGeofences[gf.id];
+  }
+
+  let layer = null;
+  const zoneType = gf.zone_type || "danger";
+  let color = "#f85149";
+  let typeLabel = "🚨 Gefahrenzone";
+  let fillOpacity = 0.15;
+
+  if (zoneType === "danger") {
+    color = "#f85149";
+    typeLabel = "🚨 Gefahrenzone";
+    fillOpacity = 0.15;
+  } else if (zoneType === "restricted") {
+    color = "#a371f7";
+    typeLabel = "⛔ Sperrzone";
+    fillOpacity = 0.15;
+  } else if (zoneType === "warning") {
+    color = "#d29922";
+    typeLabel = "⚠️ Warnbereich";
+    fillOpacity = 0.12;
+  } else if (zoneType === "operational") {
+    color = "#2f81f7";
+    typeLabel = "🔵 Einsatzabschnitt";
+    fillOpacity = 0.10;
+  }
+
+  if (gf.shape === "circle" && gf.center_lat != null && gf.center_lon != null) {
     layer = L.circle([gf.center_lat, gf.center_lon], {
       radius: gf.radius_m || 100,
-      color, fillColor: color, fillOpacity: 0.08,
-      weight: 2, dashArray: "6 4",
-    }).addTo(STATE.map).bindPopup(`<b>⬡ ${gf.name}</b>`);
+      color: color,
+      fillColor: color,
+      fillOpacity: fillOpacity,
+      weight: 2.5,
+      dashArray: "6 4",
+    });
+  } else if (gf.shape === "polygon") {
+    let coords = gf.polygon_coords;
+    if (typeof coords === "string") {
+      try { coords = JSON.parse(coords); } catch(e) { coords = []; }
+    }
+    if (Array.isArray(coords) && coords.length >= 3) {
+      layer = L.polygon(coords, {
+        color: color,
+        fillColor: color,
+        fillOpacity: fillOpacity,
+        weight: 2.5,
+        dashArray: "6 4",
+      });
+    }
   }
-  if (layer) STATE.mapGeofences.push(layer);
+
+  if (layer) {
+    layer.bindTooltip(`<b>⬡ ${escapeHTML(gf.name)}</b><br><span style="font-size:10px;opacity:0.85">${typeLabel}</span>`, {
+      sticky: true,
+      className: "geofence-tooltip"
+    });
+
+    const popupHtml = `
+      <div style="font-family:var(--font-sans);min-width:180px;padding:4px 0;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
+          <span>⬡</span> <span>${escapeHTML(gf.name)}</span>
+        </div>
+        <div style="font-size:11px;color:${color};font-weight:600;margin-bottom:6px;">${typeLabel}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+          ${gf.shape === 'circle' ? `⭕ Kreis (Radius: ${gf.radius_m || 100}m)` : `⬡ Freiform-Polygon (${(gf.polygon_coords || []).length} Eckpunkte)`}
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="deleteGeofence(${gf.id})" style="width:100%;font-size:11px;padding:4px 8px;">
+          🗑️ Zone entfernen
+        </button>
+      </div>
+    `;
+    layer.bindPopup(popupHtml);
+    layer.addTo(STATE.map);
+    STATE.mapGeofences[gf.id] = layer;
+  }
 }
 
 function toggleRSSILayer() {
@@ -1295,18 +1549,25 @@ function renderSidebarUnits() {
     let avatarContent = initials;
     if (em)    { avatarClass += " emergency"; avatarContent = "🚨"; }
     else if (isPTT) { avatarClass += " ptt"; avatarContent = "🎙"; }
+    else if (r.is_blocked) { avatarClass += " blocked"; avatarContent = "🚫"; }
     else if (r.online) { avatarClass += " online"; }
 
     let itemClass = "unit-item";
     if (em)     itemClass += " emergency-active";
     else if (isPTT) itemClass += " ptt-active";
+    if (r.is_blocked) itemClass += " unit-blocked";
+
+    let subText = r.device_model || (r.online ? "Online" : "Offline");
+    if (r.is_blocked) {
+      subText = `🚫 ${r.blocked_reason || "Gesperrt"}`;
+    }
 
     return `
-      <div class="${itemClass}" id="unit-item-${rid}" onclick="focusOnMap(${rid})">
+      <div class="${itemClass}" id="unit-item-${rid}" onclick="focusOnMap(${rid})" title="${r.is_blocked ? 'GESPERRT: ' + (r.blocked_reason || 'Blacklist') : ''}">
         <div class="${avatarClass}">${avatarContent}</div>
         <div class="unit-info">
           <div class="unit-name">${r.alias || "Radio " + rid}</div>
-          <div class="unit-sub">${r.device_model || (r.online ? "Online" : "Offline")}</div>
+          <div class="unit-sub" style="${r.is_blocked ? 'color:var(--red);font-weight:600;' : ''}">${subText}</div>
         </div>
         <span class="unit-rssi" id="unit-rssi-${rid}">${rssi != null ? rssi.toFixed(0) + "d" : ""}</span>
       </div>`;
@@ -1317,10 +1578,22 @@ function renderRadiosTable() {
   const tbody = document.getElementById("radios-table-body");
   if (!tbody) return;
 
-  const radios = Object.values(STATE.radios);
+  const filterSelect = document.getElementById("radios-filter-select");
+  const filterVal = filterSelect ? filterSelect.value : "all";
+
+  let radios = Object.values(STATE.radios);
+  if (filterVal === "active") {
+    radios = radios.filter(r => !r.is_blocked);
+  } else if (filterVal === "blocked") {
+    radios = radios.filter(r => Boolean(r.is_blocked));
+  }
+
   if (radios.length === 0) {
+    const emptyMsg = filterVal === "blocked"
+      ? "Keine gesperrten Funkgeräte in der Blacklist."
+      : (filterVal === "active" ? "Keine aktiven Funkgeräte vorhanden." : "Keine Funkgeräte konfiguriert. Klicke „+ Gerät\".");
     tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:30px">
-      Keine Funkgeräte konfiguriert. Klicke „+ Gerät".
+      ${emptyMsg}
     </td></tr>`;
     return;
   }
@@ -1331,28 +1604,46 @@ function renderRadiosTable() {
     const gps = STATE.gpsPositions[rid];
     const lat = r.last_lat ?? gps?.lat;
     const lon = r.last_lon ?? gps?.lon;
-    const gpsStr = (lat && lon) ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "—";
+    const isFixed = Boolean(r.fixed_lat != null && r.fixed_lon != null);
+    let gpsStr = "—";
+    if (isFixed) {
+      gpsStr = `<span style="color:var(--blue-400);font-weight:600;" title="Feste Position (fixiert auf Karte)">📌 ${r.fixed_lat.toFixed(5)}, ${r.fixed_lon.toFixed(5)}</span>`;
+    } else if (lat && lon) {
+      gpsStr = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    }
     const rssi = r.last_rssi ?? gps?.rssi;
     const rssiStr = rssi != null ? `${rssi.toFixed(0)} dBm` : "—";
 
-    const statusChip = em
-      ? `<span class="chip chip-emergency">🚨 NOTRUF</span>`
-      : (r.online
-        ? `<span class="chip chip-online">● Online</span>`
-        : `<span class="chip chip-offline">○ Offline</span>`);
+    let statusChips = [];
+    if (r.is_blocked) {
+      statusChips.push(`<span class="chip badge-blocked" title="Gesperrt: ${r.blocked_reason || 'Blacklist'}">🚫 GESPERRT</span>`);
+    }
+    if (em) {
+      statusChips.push(`<span class="chip chip-emergency">🚨 NOTRUF</span>`);
+    } else if (r.online) {
+      statusChips.push(`<span class="chip chip-online">● Online</span>`);
+    } else {
+      statusChips.push(`<span class="chip chip-offline">○ Offline</span>`);
+    }
+
+    const blockBtn = r.is_blocked
+      ? `<button class="btn btn-sm btn-icon" onclick="unblockRadio(${rid})" title="Sperre aufheben (Entsperren)" style="color:var(--green);font-size:13px;">🔓</button>`
+      : `<button class="btn btn-sm btn-icon" onclick="openRadioBlockModal(${rid})" title="Funkgerät sperren / Blacklist" style="color:var(--red);font-size:13px;">🚫</button>`;
 
     return `<tr>
       <td class="mono" style="font-size:11px">${rid}</td>
-      <td style="font-weight:600">${r.alias || "—"}</td>
+      <td style="font-weight:600">${r.alias || "—"}${r.is_blocked ? ` <small style="color:var(--red);font-weight:normal;">(${r.blocked_reason || 'Gesperrt'})</small>` : ""}</td>
       <td style="color:var(--text-secondary);font-size:12px">${r.device_model || "—"}</td>
-      <td>${statusChip}</td>
+      <td>${statusChips.join(" ")}</td>
       <td style="font-size:11px;font-family:var(--font-mono);color:var(--text-secondary)">${gpsStr}</td>
       <td style="font-family:var(--font-mono);font-size:12px">${rssiStr}</td>
       <td style="font-size:12px">${r.floor_level || "—"}</td>
       <td>
         <div style="display:flex;gap:4px;">
-          <button class="btn btn-sm btn-icon" onclick="focusOnMap(${rid})" title="Auf Karte">🗺</button>
+          <button class="btn btn-sm btn-icon" onclick="focusOnMap(${rid})" title="Auf Karte zentrieren">🗺</button>
+          <button class="btn btn-sm btn-icon" onclick="startSetRadioPosition(${rid})" title="Feste Position auf Karte setzen / anpassen" style="color:var(--blue-400);font-size:13px;">📍</button>
           ${em ? `<button class="btn btn-sm btn-danger" onclick="ackEmergency(${rid})">✓ Quit.</button>` : ""}
+          ${blockBtn}
           <button class="btn btn-sm btn-icon" onclick="deleteRadio(${rid})" title="Löschen" style="color:var(--text-muted)">✕</button>
         </div>
       </td>
@@ -1506,19 +1797,48 @@ function updatePortStats(stats) {
 function renderGeofencesList() {
   const el = document.getElementById("geofences-list");
   if (!el) return;
-  if (STATE.geofences.length === 0) {
-    el.innerHTML = `<div class="empty-state" style="padding:20px"><span style="opacity:0.3">⬡</span><span style="font-size:11px">Keine Geofences</span></div>`;
+  if (!STATE.geofences || STATE.geofences.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state" style="padding:24px;text-align:center;">
+        <span style="font-size:24px;opacity:0.3;display:block;margin-bottom:6px;">⬡</span>
+        <span style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:10px;">Keine taktischen Zonen definiert</span>
+        <button class="btn btn-sm btn-primary" onclick="openAddGeofenceModal()" style="font-size:11px;padding:3px 10px;">＋ Erste Zone anlegen</button>
+      </div>`;
     return;
   }
-  el.innerHTML = STATE.geofences.map(g =>
-    `<div class="infra-row" style="padding:8px var(--space-3);">
-      <span>⬡ ${g.name}</span>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span class="chip ${g.zone_type === 'danger' ? 'chip-emergency' : 'chip-online'}" style="font-size:10px">${g.zone_type}</span>
-        <button class="btn btn-sm btn-icon" onclick="deleteGeofence(${g.id})" style="color:var(--text-muted)">✕</button>
+
+  const typeConfig = {
+    danger: { icon: "🚨", label: "Gefahrenzone", chipClass: "chip-emergency" },
+    restricted: { icon: "⛔", label: "Sperrzone", chipClass: "chip-restricted", style: "background:rgba(163,113,247,0.15);color:#d2a8ff;border:1px solid rgba(163,113,247,0.3);" },
+    operational: { icon: "🔵", label: "Abschnitt", chipClass: "chip-online" },
+    warning: { icon: "⚠️", label: "Warnbereich", chipClass: "chip-warn", style: "background:rgba(210,153,34,0.15);color:#e3b341;border:1px solid rgba(210,153,34,0.3);" }
+  };
+
+  el.innerHTML = STATE.geofences.map(g => {
+    const cfg = typeConfig[g.zone_type] || typeConfig.danger;
+    const shapeInfo = g.shape === "circle" 
+      ? `⭕ ${g.radius_m || 100}m Radius` 
+      : `⬡ Freiform (${(g.polygon_coords || []).length} Punkte)`;
+
+    return `
+      <div class="infra-row" style="padding:8px var(--space-3);display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="flex:1;min-width:0;cursor:pointer;" onclick="focusOnGeofence(${g.id})" title="Auf Karte zentrieren">
+          <div style="font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px;">
+            <span>${cfg.icon}</span>
+            <span style="color:var(--text-primary);">${escapeHTML(g.name)}</span>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">
+            ${shapeInfo}
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <span class="chip ${cfg.chipClass}" style="font-size:9px;padding:2px 6px;${cfg.style || ''}">${cfg.label}</span>
+          <button class="btn btn-sm btn-icon" onclick="focusOnGeofence(${g.id})" title="Auf Karte anzeigen" style="padding:2px 5px;font-size:11px;">🎯</button>
+          <button class="btn btn-sm btn-icon btn-danger" onclick="deleteGeofence(${g.id})" title="Zone löschen" style="padding:2px 5px;font-size:11px;">✕</button>
+        </div>
       </div>
-    </div>`
-  ).join("");
+    `;
+  }).join("");
 }
 
 function renderPlansList() {
@@ -1727,10 +2047,289 @@ async function deleteMarker(id) {
   } catch(e) { console.error("Marker delete Fehler:", e); }
 }
 
-async function deleteGeofence(id) {
+// ── Taktische Zonen / Geofencing Controller ──────────────────────
+
+function openAddGeofenceModal() {
+  const modal = document.getElementById("modal-add-geofence");
+  if (!modal) return;
+  const nameInput = document.getElementById("new-geofence-name");
+  const radiusInput = document.getElementById("new-geofence-radius");
+  if (nameInput) {
+    const nextNum = (STATE.geofences || []).length + 1;
+    nameInput.value = `Gefahrenbereich ${nextNum}`;
+    setTimeout(() => { nameInput.focus(); nameInput.select(); }, 60);
+  }
+  if (radiusInput) radiusInput.value = 100;
+  selectGeofenceType("danger");
+  toggleGeofenceShapeInputs("circle");
+  const circleRadio = document.querySelector('input[name="geofence-shape"][value="circle"]');
+  if (circleRadio) circleRadio.checked = true;
+
+  modal.style.display = "flex";
+}
+
+function closeAddGeofenceModal() {
+  const modal = document.getElementById("modal-add-geofence");
+  if (modal) modal.style.display = "none";
+}
+
+function selectGeofenceType(type) {
+  STATE.selectedGeofenceType = type;
+  document.querySelectorAll("#geofence-type-selector .geofence-type-card").forEach(c => {
+    if (c.getAttribute("data-type") === type) {
+      c.classList.add("active");
+    } else {
+      c.classList.remove("active");
+    }
+  });
+}
+
+function toggleGeofenceShapeInputs(shape) {
+  const circleBox = document.getElementById("geofence-circle-settings");
+  const polyBox = document.getElementById("geofence-polygon-hint");
+  if (shape === "circle") {
+    if (circleBox) circleBox.style.display = "flex";
+    if (polyBox) polyBox.style.display = "none";
+  } else {
+    if (circleBox) circleBox.style.display = "none";
+    if (polyBox) polyBox.style.display = "block";
+  }
+}
+
+function setGeofenceRadiusPreset(r) {
+  const input = document.getElementById("new-geofence-radius");
+  if (input) input.value = r;
+}
+
+function startGeofenceDrawing() {
+  const nameInput = document.getElementById("new-geofence-name");
+  const name = nameInput?.value.trim() || "Taktische Zone";
+  const type = STATE.selectedGeofenceType || "danger";
+  const shapeRadio = document.querySelector('input[name="geofence-shape"]:checked');
+  const shape = shapeRadio ? shapeRadio.value : "circle";
+  const radius = parseFloat(document.getElementById("new-geofence-radius")?.value || 100);
+
+  closeAddGeofenceModal();
+  switchTab("map");
+
+  // Falls Marker-Modus aktiv war, beenden
+  if (STATE.addingMarker) setMarkerMode(false);
+  cleanUpGeofenceDrawing();
+
+  STATE.drawingGeofence = {
+    name,
+    zone_type: type,
+    shape,
+    radius_m: radius,
+    points: [],
+  };
+
+  const btn = document.getElementById("btn-add-geofence");
+  if (btn) btn.classList.add("zone-mode-active");
+
+  const mapEl = document.getElementById("map");
+  if (mapEl) mapEl.style.cursor = "crosshair";
+
+  const banner = document.getElementById("geofence-draw-banner");
+  const bannerText = document.getElementById("geofence-draw-text");
+  const btnFinish = document.getElementById("btn-finish-draw-geofence");
+
+  if (shape === "circle") {
+    if (bannerText) bannerText.textContent = `📍 Klicke auf die Karte, um den Mittelpunkt für '${name}' (${radius}m Radius) zu setzen`;
+    if (btnFinish) btnFinish.style.display = "none";
+    showToast("📍 Kreis-Zone platzieren", `Klicke auf die Karte, um '${name}' zu platzieren (ESC zum Abbrechen)`, "info", 4000);
+  } else {
+    if (bannerText) bannerText.textContent = `⬡ Freiform-Zone '${name}': Klicke Eckpunkte auf die Karte (0 Punkte)`;
+    if (btnFinish) btnFinish.style.display = "none";
+    showToast("⬡ Freiform-Zone", `Klicke mindestens 3 Eckpunkte auf die Karte (ESC zum Abbrechen)`, "info", 4000);
+  }
+
+  if (banner) banner.style.display = "flex";
+}
+
+async function handleGeofenceMapClick(latlng) {
+  if (!STATE.drawingGeofence) return;
+  const cfg = STATE.drawingGeofence;
+
+  if (cfg.shape === "circle") {
+    await saveNewGeofence({
+      name: cfg.name,
+      zone_type: cfg.zone_type,
+      shape: "circle",
+      center_lat: latlng.lat,
+      center_lon: latlng.lng,
+      radius_m: cfg.radius_m
+    });
+    cleanUpGeofenceDrawing();
+  } else if (cfg.shape === "polygon") {
+    cfg.points.push([latlng.lat, latlng.lng]);
+    const ptCount = cfg.points.length;
+
+    // Marker für Eckpunkt auf Karte visualisieren
+    const dot = L.circleMarker(latlng, {
+      radius: 5,
+      color: "#a371f7",
+      fillColor: "#ffffff",
+      fillOpacity: 1,
+      weight: 2
+    }).addTo(STATE.map);
+    STATE.tempGeofenceLayers.push(dot);
+
+    // Vorschau-Linie aktualisieren
+    if (cfg.previewLine) {
+      STATE.map.removeLayer(cfg.previewLine);
+      cfg.previewLine = null;
+    }
+
+    if (ptCount >= 2) {
+      cfg.previewLine = L.polyline(cfg.points, {
+        color: "#a371f7",
+        weight: 2.5,
+        dashArray: "5 5"
+      }).addTo(STATE.map);
+      STATE.tempGeofenceLayers.push(cfg.previewLine);
+    }
+
+    const bannerText = document.getElementById("geofence-draw-text");
+    const btnFinish = document.getElementById("btn-finish-draw-geofence");
+    if (bannerText) {
+      bannerText.textContent = `⬡ Freiform-Zone '${cfg.name}': ${ptCount} Eckpunkt${ptCount > 1 ? 'e' : ''} gesetzt${ptCount < 3 ? ' (mind. 3 nötig)' : ''}`;
+    }
+
+    if (ptCount >= 3 && btnFinish) {
+      btnFinish.style.display = "inline-block";
+    }
+  }
+}
+
+async function finishGeofenceDrawing() {
+  if (!STATE.drawingGeofence) return;
+  const cfg = STATE.drawingGeofence;
+  if (cfg.shape === "polygon") {
+    if (cfg.points.length < 3) {
+      showToast("Unvollständig", "Ein Freiform-Polygon benötigt mindestens 3 Eckpunkte.", "warning");
+      return;
+    }
+    await saveNewGeofence({
+      name: cfg.name,
+      zone_type: cfg.zone_type,
+      shape: "polygon",
+      polygon_coords: cfg.points
+    });
+  }
+  cleanUpGeofenceDrawing();
+}
+
+function cancelGeofenceDrawing() {
+  cleanUpGeofenceDrawing();
+  showToast("Zonen-Erstellung", "Abgebrochen", "info", 2000);
+}
+
+function cleanUpGeofenceDrawing() {
+  STATE.drawingGeofence = null;
+  const btn = document.getElementById("btn-add-geofence");
+  if (btn) btn.classList.remove("zone-mode-active");
+
+  const mapEl = document.getElementById("map");
+  if (mapEl) mapEl.style.cursor = "";
+
+  const banner = document.getElementById("geofence-draw-banner");
+  if (banner) banner.style.display = "none";
+
+  const btnFinish = document.getElementById("btn-finish-draw-geofence");
+  if (btnFinish) btnFinish.style.display = "none";
+
+  // Temporäre Zeichen-Layer entfernen
+  if (STATE.tempGeofenceLayers && STATE.tempGeofenceLayers.length > 0) {
+    STATE.tempGeofenceLayers.forEach(l => {
+      try { STATE.map?.removeLayer(l); } catch(e) {}
+    });
+    STATE.tempGeofenceLayers = [];
+  }
+}
+
+async function saveNewGeofence(payload) {
   try {
-    await fetch(`/api/geofences/${id}`, { method: "DELETE" });
-  } catch(e) { console.error("Geofence delete Fehler:", e); }
+    const res = await fetch("/api/geofences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast("Zone gespeichert", `Zone '${payload.name}' wurde erfolgreich erstellt.`, "success");
+    } else {
+      showToast("Fehler", "Zone konnte nicht gespeichert werden.", "error");
+    }
+  } catch(e) {
+    console.error("Fehler beim Speichern der Geofence:", e);
+    showToast("Fehler", "Netzwerkfehler beim Anlegen der Zone.", "error");
+  }
+}
+
+function focusOnGeofence(id) {
+  const gf = STATE.geofences.find(g => g.id === id);
+  if (!gf || !STATE.map) return;
+  switchTab("map");
+  const layer = STATE.mapGeofences ? STATE.mapGeofences[id] : null;
+  if (layer) {
+    if (typeof layer.getBounds === "function") {
+      STATE.map.fitBounds(layer.getBounds(), { padding: [50, 50], maxZoom: 17 });
+    } else if (gf.center_lat && gf.center_lon) {
+      STATE.map.setView([gf.center_lat, gf.center_lon], 16);
+    }
+    setTimeout(() => {
+      layer.openPopup();
+    }, 250);
+  } else if (gf.center_lat && gf.center_lon) {
+    STATE.map.setView([gf.center_lat, gf.center_lon], 16);
+  }
+}
+
+function onZoneBreach(msg) {
+  const isDanger = msg.severity === "danger";
+  const icon = isDanger ? "🚨" : (msg.severity === "warning" ? "⚠️" : "📍");
+  const title = isDanger ? "GEFAHRENZONE BETRETEN" : (msg.severity === "warning" ? "ABSCHNITT VERLASSEN" : "Zonen-Ereignis");
+
+  // Akustischer Sirenen-Ton bei Gefahrenzonen
+  if (isDanger) {
+    playAlarmSound();
+  }
+
+  showToast(`${icon} ${title}`, msg.message, msg.severity || "info", 9000);
+
+  // Visuelles Hervorheben der betroffenen Zone auf der Karte
+  if (msg.zone_id && STATE.mapGeofences && STATE.mapGeofences[msg.zone_id]) {
+    const layer = STATE.mapGeofences[msg.zone_id];
+    const origWeight = layer.options?.weight || 2.5;
+    layer.setStyle({ weight: 6, fillOpacity: 0.4 });
+    setTimeout(() => {
+      layer.setStyle({ weight: origWeight, fillOpacity: layer.options?.fillOpacity || 0.15 });
+    }, 4500);
+  }
+}
+
+async function deleteGeofence(id) {
+  const gf = STATE.geofences.find(g => g.id === id);
+  const name = gf ? gf.name : `Zone #${id}`;
+  if (!confirm(`Möchten Sie die Zone '${name}' wirklich löschen?`)) return;
+
+  try {
+    const res = await fetch(`/api/geofences/${id}`, { method: "DELETE" });
+    const data = await res.json();
+    if (data.ok) {
+      if (STATE.mapGeofences && STATE.mapGeofences[id]) {
+        STATE.map?.removeLayer(STATE.mapGeofences[id]);
+        delete STATE.mapGeofences[id];
+      }
+      STATE.geofences = STATE.geofences.filter(g => g.id !== id);
+      renderGeofencesList();
+      showToast("Zone gelöscht", `Zone '${name}' wurde entfernt.`, "info");
+    }
+  } catch(e) {
+    console.error("Geofence delete Fehler:", e);
+    showToast("Fehler", "Zone konnte nicht gelöscht werden", "error");
+  }
 }
 
 async function deletePlan(id) {
@@ -1751,6 +2350,9 @@ async function activatePlan(id) {
 // ── Taktischer Marker Modus & Modal ──────────────────────────────
 function setMarkerMode(active) {
   STATE.addingMarker = active;
+  if (active && STATE.drawingGeofence) {
+    cleanUpGeofenceDrawing();
+  }
   const btn = document.getElementById("btn-add-marker");
   const mapContainer = STATE.map?.getContainer();
 
@@ -1942,6 +2544,7 @@ async function loadHardwareStatus() {
     if (data.ups)      onUPSUpdate({ data: data.ups });
     if (data.zte)      onZTEUpdate({ data: data.zte });
     if (data.omada)    onOmadaUpdate({ data: data.omada });
+    loadRepeaterLogs();
   } catch(e) { /* Ignore */ }
 }
 
@@ -2058,17 +2661,56 @@ function setupEventListeners() {
     } catch(e) { console.error("Add radio Fehler:", e); }
   });
 
+  // BOS Schnellvorlagen für SMS
+  document.querySelectorAll(".sms-tpl-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const text = btn.getAttribute("data-text");
+      const input = document.getElementById("sms-text-input");
+      if (input && text) {
+        input.value = text;
+        input.focus();
+      }
+    });
+  });
+
+  // SMS Broadcast Checkbox
+  const broadcastCheck = document.getElementById("sms-broadcast-check");
+  const targetIdInput = document.getElementById("sms-target-id");
+  if (broadcastCheck && targetIdInput) {
+    broadcastCheck.addEventListener("change", () => {
+      if (broadcastCheck.checked) {
+        targetIdInput.value = "16777215";
+        targetIdInput.disabled = true;
+      } else {
+        targetIdInput.value = "";
+        targetIdInput.disabled = false;
+        targetIdInput.focus();
+      }
+    });
+  }
+
   // SMS senden
   document.getElementById("btn-send-sms")?.addEventListener("click", async () => {
-    const targetId = parseInt(document.getElementById("sms-target-id").value) || 0;
+    const isBroadcast = document.getElementById("sms-broadcast-check")?.checked;
+    const targetId = isBroadcast ? 16777215 : (parseInt(document.getElementById("sms-target-id").value) || 0);
     const text     = document.getElementById("sms-text-input").value.trim();
     if (!text) return;
     try {
-      await fetch("/api/sms/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sender_id: 0, target_id: targetId, text }),
-      });
+      if (isBroadcast || targetId === 16777215) {
+        await fetch("/api/sms/broadcast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_id: 0, text }),
+        });
+        showToast("📢 SMS-Rundruf gesendet", text, "good");
+      } else {
+        await fetch("/api/sms/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_id: 0, target_id: targetId, text }),
+        });
+        showToast("✓ SMS gesendet", `An Radio ${targetId}`, "info");
+      }
       document.getElementById("sms-text-input").value = "";
     } catch(e) { console.error("SMS Fehler:", e); }
   });
@@ -2147,6 +2789,15 @@ function setupEventListeners() {
     setMarkerMode(!STATE.addingMarker);
   });
 
+  // Taktische Zonen / Geofence anlegen
+  document.getElementById("btn-add-geofence")?.addEventListener("click", openAddGeofenceModal);
+  document.getElementById("new-geofence-name")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      startGeofenceDrawing();
+    }
+  });
+
   document.getElementById("btn-toggle-labels")?.addEventListener("click", toggleMapLabels);
 
   // Marker Modal Aktionen
@@ -2214,10 +2865,31 @@ function setupEventListeners() {
     } catch(e) { showToast("⚠ Scan Fehler", String(e), "warning"); }
   });
 
+  // USV Zähler zurücksetzen
+  document.getElementById("btn-ups-reset-counters")?.addEventListener("click", async () => {
+    if (!confirm("Energieverbrauch (kWh) und Netzausfallzähler der USV auf 0 zurücksetzen?")) return;
+    try {
+      const res = await fetch("/api/hardware/ups/reset_counters", { method: "POST" });
+      const data = await res.json();
+      if (data.status === "ok") {
+        showToast("✓ USV-Zähler", "Energie- und Ausfallzähler wurden zurückgesetzt", "good");
+        setText("ups-energy-kwh", "0.000 kWh");
+        setText("ups-transfers", "0 Mal (0s)");
+      } else {
+        showToast("⚠ Fehler", data.detail || "Zähler konnten nicht zurückgesetzt werden", "warning");
+      }
+    } catch (e) {
+      showToast("⚠ Fehler", String(e), "warning");
+    }
+  });
+
   // IDs JSON export
   document.getElementById("btn-export-ids")?.addEventListener("click", () => {
     window.open("/api/export/ids_json", "_blank");
   });
+
+  // Web-PTT Dispatcher & Mobile Transmitter Setup
+  setupWebPttListeners();
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2226,11 +2898,14 @@ function setupEventListeners() {
 document.addEventListener("DOMContentLoaded", () => {
   console.log("[HCC] Hytera Command Center gestartet");
 
+  initTheme();
   setupEventListeners();
   updateClock();
   setInterval(updateClock, 1000);
   connectWS();
   initAudioPlayer();
+  loadProfilesList();
+  populateAudioInputDevices();
 
   // Port-Stats initial laden
   setTimeout(loadPortStats, 2000);
@@ -2452,10 +3127,29 @@ function initAudioPlayer() {
   document.addEventListener("keydown", (e) => {
     // ESC bricht Modale und Marker-Modus immer ab, auch wenn Input fokussiert ist
     if (e.key === "Escape") {
+      if (STATE.settingRadioPositionId) {
+        e.preventDefault();
+        STATE.settingRadioPositionId = null;
+        const mapEl = document.getElementById("map");
+        if (mapEl) mapEl.style.cursor = "";
+        showToast("Positionierung", "Abgebrochen", "info", 2000);
+        return;
+      }
       if (STATE.addingMarker) {
         e.preventDefault();
         setMarkerMode(false);
         showToast("Marker", "Abgebrochen", "info", 2000);
+        return;
+      }
+      if (STATE.drawingGeofence) {
+        e.preventDefault();
+        cancelGeofenceDrawing();
+        return;
+      }
+      const geofenceModal = document.getElementById("modal-add-geofence");
+      if (geofenceModal && geofenceModal.style.display !== "none") {
+        e.preventDefault();
+        closeAddGeofenceModal();
         return;
       }
       const markerModal = document.getElementById("modal-add-marker");
@@ -2486,7 +3180,7 @@ function initAudioPlayer() {
     const barEl = document.getElementById("global-audio-bar");
     if (!audioEl || !barEl || barEl.style.display === "none") return;
 
-    if (e.code === "Space") {
+    if (e.key === "k" || e.key === "K") {
       e.preventDefault();
       if (audioEl.paused) audioEl.play().catch(e => console.warn(e));
       else audioEl.pause();
@@ -2652,5 +3346,1252 @@ function onAudioReady(msg) {
   updateLatestCallButton();
   showToast(`🎙️ Aufnahme bereit: PTT #${msg.ptt_id} (${msg.duration}s) – Klick oben auf '↺ Letzter Funkspruch'`, "info");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Web-PTT Dispatcher & Smartphone Audio Transmitter
+// ═══════════════════════════════════════════════════════════════════
+let pttAudioContext = null;
+let pttMediaStream = null;
+let pttScriptNode = null;
+let pttAudioWs = null;
+let isWebPttActive = false;
+let pttTimerInterval = null;
+let pttStartTimestamp = 0;
+
+async function initPttAudio(deviceId = null) {
+  if (pttMediaStream) {
+    try { pttMediaStream.getTracks().forEach(t => t.stop()); } catch(e) {}
+    pttMediaStream = null;
+  }
+  try {
+    const audioConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+    const deviceSelect = document.getElementById("ptt-audio-device-select");
+    const targetDevId = deviceId || deviceSelect?.value;
+    if (targetDevId) {
+      audioConstraints.deviceId = { exact: targetDevId };
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    pttMediaStream = stream;
+    pttAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = pttAudioContext.createMediaStreamSource(stream);
+
+    // BufferSize: 2048 samples für flüssiges Streaming
+    pttScriptNode = pttAudioContext.createScriptProcessor(2048, 1, 1);
+    source.connect(pttScriptNode);
+    // Durch Stummschaltung (Gain=0) schleifen, um Rückkopplung auf eigene Lautsprecher zu verhindern
+    const silenceGain = pttAudioContext.createGain();
+    silenceGain.gain.value = 0;
+    pttScriptNode.connect(silenceGain);
+    silenceGain.connect(pttAudioContext.destination);
+
+    pttScriptNode.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0);
+
+      // VU-Meter RMS berechnen
+      let sum = 0;
+      for (let i = 0; i < inputData.length; i++) {
+        sum += inputData[i] * inputData[i];
+      }
+      const rms = Math.sqrt(sum / inputData.length);
+      updatePttVuMeter(rms);
+
+      // Falls PTT aktiv: in 16-Bit PCM konvertieren und per WS streamen
+      if (isWebPttActive && pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
+        const int16Buffer = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]));
+          int16Buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        pttAudioWs.send(int16Buffer.buffer);
+      }
+    };
+
+    connectPttAudioWs();
+    showToast("✓ Mikrofon bereit für PTT", "info");
+    return true;
+  } catch (err) {
+    console.error("Mikrofon-Zugriff verweigert:", err);
+    showToast("Mikrofon-Zugriff verweigert oder nicht vorhanden.", "warning");
+    return false;
+  }
+}
+
+function connectPttAudioWs() {
+  if (pttAudioWs && (pttAudioWs.readyState === WebSocket.OPEN || pttAudioWs.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${protocol}//${window.location.host}/ws/tx_audio`;
+  pttAudioWs = new WebSocket(wsUrl);
+  pttAudioWs.binaryType = "arraybuffer";
+
+  pttAudioWs.onopen = () => {
+    console.log("[Web-PTT] Audio-WebSocket verbunden");
+  };
+  pttAudioWs.onclose = () => {
+    console.log("[Web-PTT] Audio-WebSocket getrennt");
+    setTimeout(connectPttAudioWs, 3000);
+  };
+  pttAudioWs.onerror = (e) => console.debug("[Web-PTT] WS Error:", e);
+}
+
+function updatePttVuMeter(rms) {
+  const bars = [
+    document.getElementById("vu-bar-1"),
+    document.getElementById("vu-bar-2"),
+    document.getElementById("vu-bar-3"),
+    document.getElementById("vu-bar-4"),
+    document.getElementById("vu-bar-5"),
+  ];
+  if (!bars[0]) return;
+
+  const thresholds = [0.015, 0.05, 0.12, 0.25, 0.45];
+  bars.forEach((bar, idx) => {
+    if (rms > thresholds[idx]) {
+      bar.className = `ptt-vu-bar level-${idx + 1}`;
+    } else {
+      bar.className = "ptt-vu-bar";
+    }
+  });
+}
+
+function onPttCallTypeSelectChange() {
+  const sel = document.getElementById("ptt-calltype-select");
+  const tgInput = document.getElementById("ptt-target-tg");
+  const tgLabel = document.querySelector('label[for="ptt-target-tg"]');
+  if (!sel || !tgInput) return;
+  const val = sel.value;
+  if (val === "2") { // All-Call
+    tgInput.dataset.prevTg = tgInput.value;
+    tgInput.value = "16777215";
+    tgInput.disabled = true;
+    tgInput.title = "DMR All-Call Broadcast (an alle Funkgeräte auf diesem Zeitschlitz)";
+    if (tgLabel) tgLabel.textContent = "Ziel:";
+  } else if (val === "0") { // Einzelruf
+    if (tgInput.value === "16777215") {
+      tgInput.value = tgInput.dataset.prevTg || "4001";
+    }
+    tgInput.disabled = false;
+    tgInput.title = "Ziel-Funkgeräte-ID (z. B. 4001)";
+    if (tgLabel) tgLabel.textContent = "Ziel-ID:";
+  } else { // Gruppe
+    if (tgInput.value === "16777215") {
+      tgInput.value = tgInput.dataset.prevTg || "1";
+    }
+    tgInput.disabled = false;
+    tgInput.title = "Ziel-Talkgroup (z. B. 1 oder 9)";
+    if (tgLabel) tgLabel.textContent = "Ziel-TG:";
+  }
+}
+
+async function startWebPtt() {
+  if (isWebPttActive) return;
+
+  try {
+    const ok = await initPttAudio();
+    if (!ok) {
+      showToast("Mikrofon nicht bereit", "Bitte Mikrofonzugriff im Browser erlauben oder auf '🎤 Mic' klicken.", "warning", 4000);
+      return;
+    }
+
+    if (pttAudioContext && pttAudioContext.state === "suspended") {
+      await pttAudioContext.resume();
+    }
+
+    isWebPttActive = true;
+    pttStartTimestamp = Date.now();
+    playPttStartChirp();
+
+  const slot = document.getElementById("ptt-slot-select")?.value || "TS1";
+  const callType = parseInt(document.getElementById("ptt-calltype-select")?.value) || 1;
+  const targetId = (callType === 2) 
+    ? 16777215 
+    : (parseInt(document.getElementById("ptt-target-tg")?.value) || 1);
+
+  // UI sofort auf aktiv setzen
+  const btn = document.getElementById("btn-web-ptt");
+  const bar = document.getElementById("web-ptt-bar");
+  const btnText = document.getElementById("ptt-btn-text");
+  const timerEl = document.getElementById("ptt-tx-timer");
+
+  if (btn) btn.classList.add("active");
+  if (bar) bar.classList.add("tx-active");
+  if (btnText) btnText.textContent = (callType === 2) ? "🚨 ALL-CALL..." : "🔴 SENDET...";
+  if (timerEl) {
+    timerEl.classList.add("active");
+    timerEl.textContent = "00:00";
+  }
+
+  clearInterval(pttTimerInterval);
+  pttTimerInterval = setInterval(() => {
+    const elapsedSec = Math.floor((Date.now() - pttStartTimestamp) / 1000);
+    const m = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
+    const s = String(elapsedSec % 60).padStart(2, "0");
+    if (timerEl) timerEl.textContent = `${m}:${s}`;
+  }, 500);
+
+  // Befehl senden
+  const cmd = {
+    action: "ptt_press",
+    slot: slot,
+    target_id: targetId,
+    call_type: callType,
+    sample_rate: pttAudioContext.sampleRate,
+  };
+
+  if (pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
+    pttAudioWs.send(JSON.stringify(cmd));
+  } else {
+    fetch("/api/tx/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cmd),
+    }).catch(e => console.error("TX Start API Fehler:", e));
+  }
+
+    // Audio-Wiedergabe stoppen falls gerade aktiv
+    const audio = document.getElementById("global-audio-element");
+    if (audio && !audio.paused) audio.pause();
+  } catch (err) {
+    isWebPttActive = false;
+    console.error("startWebPtt Fehler:", err);
+    showToast("PTT Fehler", String(err?.message || err), "warning");
+  }
+}
+
+function stopWebPtt() {
+  if (!isWebPttActive) return;
+  isWebPttActive = false;
+  clearInterval(pttTimerInterval);
+  playRogerBeep();
+
+  const btn = document.getElementById("btn-web-ptt");
+  const bar = document.getElementById("web-ptt-bar");
+  const btnText = document.getElementById("ptt-btn-text");
+  const timerEl = document.getElementById("ptt-tx-timer");
+
+  if (btn) btn.classList.remove("active");
+  if (bar) bar.classList.remove("tx-active");
+  if (btnText) btnText.textContent = "PTT SPRECHEN";
+  if (timerEl) {
+    timerEl.classList.remove("active");
+    timerEl.textContent = "00:00";
+  }
+  updatePttVuMeter(0);
+
+  const cmd = { action: "ptt_release" };
+  if (pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
+    pttAudioWs.send(JSON.stringify(cmd));
+  } else {
+    fetch("/api/tx/stop", { method: "POST" }).catch(e => console.error("TX Stop API Fehler:", e));
+  }
+}
+
+function onTxStateChanged(msg) {
+  const pttInd = document.getElementById("ptt-indicator-container");
+  const pttText = document.getElementById("ptt-indicator-text");
+  const pttBar = document.getElementById("web-ptt-bar");
+  const btn = document.getElementById("btn-web-ptt");
+  const btnText = document.getElementById("ptt-btn-text");
+  const timerEl = document.getElementById("ptt-tx-timer");
+
+  if (msg.is_transmitting) {
+    if (pttInd) pttInd.style.display = "flex";
+    if (pttText) {
+      if (msg.call_type === 2 || msg.target_id === 16777215) {
+        pttText.textContent = `🚨 ALL-CALL RUNDRUF (${msg.slot} an ALLE GERÄTE)`;
+      } else if (msg.call_type === 0) {
+        pttText.textContent = `🔴 EINZELRUF (${msg.slot} an ID ${msg.target_id})`;
+      } else {
+        pttText.textContent = `🔴 LEITSTELLE SENDET (${msg.slot} an TG ${msg.target_id})`;
+      }
+    }
+    if (pttBar) pttBar.classList.add("tx-active");
+    if (btnText && isWebPttActive) btnText.textContent = (msg.call_type === 2 || msg.target_id === 16777215) ? "🚨 ALL-CALL..." : "🔴 SENDET...";
+    if (timerEl && msg.duration_s !== undefined) {
+      const m = String(Math.floor(msg.duration_s / 60)).padStart(2, "0");
+      const s = String(Math.floor(msg.duration_s % 60)).padStart(2, "0");
+      timerEl.textContent = `${m}:${s}`;
+      timerEl.classList.add("active");
+    }
+  } else {
+    if (pttInd) pttInd.style.display = "none";
+    if (pttBar && !isWebPttActive) pttBar.classList.remove("tx-active");
+    if (btn && !isWebPttActive) btn.classList.remove("active");
+    if (btnText && !isWebPttActive) btnText.textContent = "PTT SPRECHEN";
+    if (timerEl && !isWebPttActive) {
+      timerEl.classList.remove("active");
+      timerEl.textContent = "00:00";
+    }
+  }
+}
+
+function setupWebPttListeners() {
+  const btn = document.getElementById("btn-web-ptt");
+  const micBtn = document.getElementById("btn-ptt-mic-perm");
+
+  if (micBtn) {
+    micBtn.addEventListener("click", () => initPttAudio());
+  }
+
+  if (btn) {
+    // Maus-Events (Desktop)
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startWebPtt();
+    });
+    btn.addEventListener("mouseup", () => stopWebPtt());
+    btn.addEventListener("mouseleave", () => {
+      if (isWebPttActive) stopWebPtt();
+    });
+
+    // Touch-Events (Smartphone & Tablets)
+    btn.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      startWebPtt();
+    }, { passive: false });
+
+    btn.addEventListener("touchend", (e) => {
+      e.preventDefault();
+      stopWebPtt();
+    }, { passive: false });
+
+    btn.addEventListener("touchcancel", (e) => {
+      e.preventDefault();
+      stopWebPtt();
+    }, { passive: false });
+  }
+
+  // Tastatur Hotkey: Leertaste halten
+  window.addEventListener("keydown", (e) => {
+    if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.repeat) {
+      const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
+      if (tag !== "input" && tag !== "textarea" && tag !== "select" && !document.activeElement?.isContentEditable) {
+        e.preventDefault();
+        startWebPtt();
+      }
+    }
+  });
+
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "Space" || e.key === " " || e.key === "Spacebar") {
+      const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
+      if (tag !== "input" && tag !== "textarea" && tag !== "select" && !document.activeElement?.isContentEditable) {
+        e.preventDefault();
+        stopWebPtt();
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ERGONOMIE & ANZEIGE-MODI (Outdoor Sonnenlicht / Taktisches Rotlicht)
+// ═══════════════════════════════════════════════════════════════════
+
+function setAppTheme(theme) {
+  document.body.classList.remove("theme-outdoor", "theme-redlight");
+  if (theme === "outdoor") {
+    document.body.classList.add("theme-outdoor");
+  } else if (theme === "redlight") {
+    document.body.classList.add("theme-redlight");
+  }
+  localStorage.setItem("hcc_theme", theme);
+  document.querySelectorAll(".theme-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.id === `theme-btn-${theme}`);
+  });
+  if (STATE.map) {
+    setTimeout(() => STATE.map.invalidateSize(), 100);
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem("hcc_theme") || "dark";
+  setAppTheme(saved);
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(err => {
+      console.warn("Fullscreen nicht möglich:", err);
+    });
+  } else {
+    if (document.exitFullscreen) {
+      document.exitFullscreen();
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AKUSTISCHE ROGER-BEEPS & PTT-CHIRPS (Web Audio API Synthesizer)
+// ═══════════════════════════════════════════════════════════════════
+
+function playPttStartChirp() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    const t = ctx.currentTime;
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.exponentialRampToValueAtTime(1175, t + 0.07);
+    gain.gain.setValueAtTime(0.2, t);
+    gain.gain.linearRampToValueAtTime(0, t + 0.08);
+    osc.start(t);
+    osc.stop(t + 0.08);
+  } catch(e) {}
+}
+
+function playRogerBeep() {
+  const enabled = document.getElementById("ptt-roger-beep")?.checked !== false;
+  if (!enabled) return;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    const t = ctx.currentTime;
+    osc.frequency.setValueAtTime(1209, t);
+    osc.frequency.setValueAtTime(880, t + 0.08);
+    gain.gain.setValueAtTime(0.22, t);
+    gain.gain.setValueAtTime(0.22, t + 0.08);
+    gain.gain.linearRampToValueAtTime(0, t + 0.16);
+    osc.start(t);
+    osc.stop(t + 0.16);
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SMARTPHONE-KOPPLUNG & QR-CODE
+// ═══════════════════════════════════════════════════════════════════
+
+async function openQrModal() {
+  const modal = document.getElementById("modal-qr-connect");
+  if (!modal) return;
+  modal.style.display = "flex";
+
+  try {
+    const res = await fetch("/api/system/network_interfaces");
+    const data = await res.json();
+    const select = document.getElementById("qr-interface-select");
+    if (select && data.interfaces) {
+      select.innerHTML = "";
+      data.interfaces.forEach(iface => {
+        const opt = document.createElement("option");
+        opt.value = iface.ip;
+        opt.textContent = `${iface.name}: ${iface.ip}`;
+        if (iface.ip === data.recommended_ip) opt.selected = true;
+        select.appendChild(opt);
+      });
+    }
+  } catch(e) {
+    console.warn("Fehler beim Laden der Interfaces:", e);
+  }
+
+  reloadQrCode();
+}
+
+function closeQrModal() {
+  const modal = document.getElementById("modal-qr-connect");
+  if (modal) modal.style.display = "none";
+}
+
+async function reloadQrCode() {
+  const select = document.getElementById("qr-interface-select");
+  const ip = select?.value || "";
+  const container = document.getElementById("qr-code-container");
+  const directUrlInput = document.getElementById("qr-direct-url");
+
+  const port = window.location.port ? `:${window.location.port}` : "";
+  const targetIp = ip || window.location.hostname;
+  const fullUrl = `${window.location.protocol}//${targetIp}${port}/`;
+
+  if (directUrlInput) directUrlInput.value = fullUrl;
+
+  try {
+    const res = await fetch(`/api/system/qr_connect?ip=${encodeURIComponent(ip)}`);
+    const svgText = await res.text();
+    if (container) container.innerHTML = svgText;
+  } catch(e) {
+    if (container) container.innerHTML = `<span style="color:var(--red);">QR-Code konnte nicht geladen werden</span>`;
+  }
+}
+
+function copyDirectUrl() {
+  const input = document.getElementById("qr-direct-url");
+  if (input) {
+    navigator.clipboard.writeText(input.value).then(() => {
+      showToast("✓ In Zwischenablage kopiert", input.value, "info");
+    }).catch(() => {
+      input.select();
+      document.execCommand("copy");
+      showToast("✓ Kopiert", input.value, "info");
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BROWSER-GPS ("MEIN STANDORT") AUF LAGEKARTE
+// ═══════════════════════════════════════════════════════════════════
+
+let myLocationMarker = null;
+let myLocationCircle = null;
+
+function centerOnMyLocation() {
+  if (!navigator.geolocation) {
+    showToast("GPS nicht verfügbar", "Ihr Browser unterstützt keine Standortermittlung.", "warning");
+    return;
+  }
+
+  showToast("📍 Standortsuche", "Ermittle aktuellen GPS-Standort...", "info");
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      const accuracy = pos.coords.accuracy;
+
+      if (!STATE.map) {
+        switchTab("map");
+      }
+      if (!STATE.map) return;
+
+      if (myLocationMarker) STATE.map.removeLayer(myLocationMarker);
+      if (myLocationCircle) STATE.map.removeLayer(myLocationCircle);
+
+      const icon = L.divIcon({
+        className: "my-location-marker",
+        html: `<div style="background:#0284c7;border:3px solid #ffffff;border-radius:50%;width:18px;height:18px;box-shadow:0 0 12px #0284c7;"></div>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      });
+
+      myLocationMarker = L.marker([lat, lon], { icon }).addTo(STATE.map);
+      myLocationMarker.bindPopup(`<b>📍 Mein Standort (Command Center)</b><br>Genauigkeit: ±${Math.round(accuracy)}m`);
+
+      myLocationCircle = L.circle([lat, lon], {
+        radius: accuracy,
+        color: "#0284c7",
+        fillColor: "#0284c7",
+        fillOpacity: 0.15,
+        weight: 1
+      }).addTo(STATE.map);
+
+      STATE.map.setView([lat, lon], 16);
+      showToast("✓ Standort gefunden", `Genauigkeit: ±${Math.round(accuracy)}m`, "good");
+    },
+    (err) => {
+      console.warn("GPS-Fehler:", err);
+      showToast("GPS-Fehler", err.message || "Standort konnte nicht ermittelt werden.", "warning");
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// OFFLINE-KARTEN TILE PRE-CACHING
+// ═══════════════════════════════════════════════════════════════════
+
+function openTileCacheModal() {
+  const modal = document.getElementById("modal-tile-cache");
+  if (!modal) return;
+  modal.style.display = "flex";
+  updateTileCacheStatus();
+}
+
+function closeTileCacheModal() {
+  const modal = document.getElementById("modal-tile-cache");
+  if (modal) modal.style.display = "none";
+}
+
+async function updateTileCacheStatus() {
+  try {
+    const res = await fetch("/api/map/cache_status");
+    const data = await res.json();
+    const hint = document.getElementById("tile-cache-size-hint");
+    if (hint) {
+      hint.textContent = `Bereits im Cache: ${data.total_tiles_cached} Kacheln (${data.total_size_mb} MB)`;
+    }
+  } catch(e) {
+    console.warn("Fehler beim Abruf des Cache-Status:", e);
+  }
+}
+
+async function startTileDownload() {
+  if (!STATE.map) {
+    showToast("Karte nicht initialisiert", "Bitte zuerst Lagekarte aufrufen", "warning");
+    return;
+  }
+
+  const center = STATE.map.getCenter();
+  const radiusKm = parseFloat(document.getElementById("tile-cache-radius")?.value || "5");
+  const maxZoom = parseInt(document.getElementById("tile-cache-zoom")?.value || "17");
+
+  const progressBox = document.getElementById("tile-cache-progress-box");
+  const statusLabel = document.getElementById("tile-cache-status-label");
+  const downloadBtn = document.getElementById("btn-do-cache-tiles");
+
+  if (progressBox) progressBox.style.display = "block";
+  if (downloadBtn) downloadBtn.disabled = true;
+  if (statusLabel) statusLabel.textContent = `Berechne Kacheln im Umkreis von ${radiusKm} km um [${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}]...`;
+
+  try {
+    const payload = {
+      lat: center.lat,
+      lon: center.lng,
+      radius_km: radiusKm,
+      min_zoom: 12,
+      max_zoom: maxZoom
+    };
+    const res = await fetch("/api/map/cache_area", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const result = await res.json();
+
+    if (result.status === "ok") {
+      if (statusLabel) statusLabel.textContent = `✓ ${result.downloaded} Kacheln heruntergeladen (${result.already_cached} waren bereits vorhanden).`;
+      showToast("✓ Offline-Karten bereit", `${result.total_needed} Kacheln lokal gesichert`, "good");
+      updateTileCacheStatus();
+    } else {
+      if (statusLabel) statusLabel.textContent = `⚠ Fehler: ${result.detail || "Unbekannt"}`;
+      showToast("Cache-Fehler", result.detail || "Konnte Kacheln nicht laden", "warning");
+    }
+  } catch(e) {
+    if (statusLabel) statusLabel.textContent = `⚠ Fehler beim Herunterladen: ${e.message}`;
+  } finally {
+    if (downloadBtn) downloadBtn.disabled = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SUBMETZ-AUTODISCOVERY SCANNER
+// ═══════════════════════════════════════════════════════════════════
+
+function openSubnetScanModal() {
+  const modal = document.getElementById("modal-subnet-scan");
+  if (!modal) return;
+  modal.style.display = "flex";
+  const rptIp = document.getElementById("cfg-repeater-ip")?.value || "192.168.0.230";
+  const parts = rptIp.split(".");
+  if (parts.length >= 3) {
+    const subnetInput = document.getElementById("scan-subnet-input");
+    if (subnetInput) subnetInput.value = `${parts[0]}.${parts[1]}.${parts[2]}`;
+  }
+}
+
+function closeSubnetScanModal() {
+  const modal = document.getElementById("modal-subnet-scan");
+  if (modal) modal.style.display = "none";
+}
+
+async function startSubnetScan() {
+  const subnetInput = document.getElementById("scan-subnet-input");
+  const statusText = document.getElementById("scan-status-text");
+  const resultsList = document.getElementById("scan-results-list");
+  const scanBtn = document.getElementById("btn-start-subnet-scan");
+
+  const subnet = subnetInput?.value?.trim() || "";
+  if (!subnet) {
+    showToast("Ungültiges Subnetz", "Bitte z.B. 192.168.0 eingeben", "warning");
+    return;
+  }
+
+  if (scanBtn) scanBtn.disabled = true;
+  if (statusText) statusText.textContent = `Scanne ${subnet}.1 bis ${subnet}.254 (Port 161, 502, 80)...`;
+  if (resultsList) resultsList.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:20px;">Scanne Netzwerk... Bitte warten...</div>`;
+
+  try {
+    const res = await fetch("/api/hardware/scan_subnet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subnet_prefix: subnet })
+    });
+    const data = await res.json();
+
+    if (scanBtn) scanBtn.disabled = false;
+    if (statusText) statusText.textContent = `Scan beendet: ${data.count} Geräte in ${data.scan_time_seconds}s gefunden`;
+
+    if (!data.results || data.results.length === 0) {
+      if (resultsList) resultsList.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:24px;">Keine Hytera-, USV- oder Gateway-Geräte im Subnetz ${subnet}.0/24 gefunden.</div>`;
+      return;
+    }
+
+    let html = "";
+    data.results.forEach(dev => {
+      const typeBadge = dev.type === "repeater"
+        ? `<span class="chip chip-online">Repeater (Port 161)</span>`
+        : dev.type === "ups"
+        ? `<span class="chip chip-warning">USV (Port 502)</span>`
+        : `<span class="chip" style="background:var(--accent-glow);color:var(--accent);">Gateway (Web)</span>`;
+
+      html += `
+        <div class="scan-result-row">
+          <div>
+            <span class="scan-result-ip">${dev.ip}</span>
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">${dev.description}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            ${typeBadge}
+            ${dev.type === "repeater" ? `<button class="btn btn-xs btn-primary" onclick="setRepeaterIp('${dev.ip}')">Als Repeater</button>` : ''}
+            ${dev.type === "ups" ? `<button class="btn btn-xs btn-warning" onclick="setUsvIp('${dev.ip}')">Als USV</button>` : ''}
+            ${dev.type === "gateway" ? `<button class="btn btn-xs btn-secondary" onclick="setGatewayIp('${dev.ip}')">Als Router</button>` : ''}
+          </div>
+        </div>
+      `;
+    });
+    if (resultsList) resultsList.innerHTML = html;
+  } catch(e) {
+    if (scanBtn) scanBtn.disabled = false;
+    if (statusText) statusText.textContent = `Fehler: ${e.message}`;
+  }
+}
+
+function setRepeaterIp(ip) {
+  const el = document.getElementById("cfg-repeater-ip");
+  if (el) el.value = ip;
+  showToast("✓ Repeater-IP gesetzt", ip, "good");
+  closeSubnetScanModal();
+}
+
+function setUsvIp(ip) {
+  const el = document.getElementById("cfg-usv-ip");
+  if (el) el.value = ip;
+  showToast("✓ USV-IP gesetzt", ip, "good");
+  closeSubnetScanModal();
+}
+
+function setGatewayIp(ip) {
+  const zte = document.getElementById("cfg-zte-ip");
+  const omada = document.getElementById("cfg-omada-ip");
+  if (zte) zte.value = ip;
+  if (omada) omada.value = ip;
+  showToast("✓ Gateway-IP gesetzt", ip, "good");
+  closeSubnetScanModal();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STANDORT- UND NETZWERK-PROFILE
+// ═══════════════════════════════════════════════════════════════════
+
+async function loadProfilesList() {
+  try {
+    const res = await fetch("/api/system/profiles");
+    const data = await res.json();
+    const select = document.getElementById("cfg-profile-select");
+    const chip = document.getElementById("current-profile-chip");
+    if (select && data.profiles) {
+      select.innerHTML = "";
+      Object.entries(data.profiles).forEach(([id, prof]) => {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = `${prof.name} (${prof.description || ''})`;
+        if (id === data.active_profile) opt.selected = true;
+        select.appendChild(opt);
+      });
+    }
+    if (chip && data.active_profile && data.profiles[data.active_profile]) {
+      chip.textContent = data.profiles[data.active_profile].name;
+    }
+  } catch(e) {
+    console.warn("Fehler beim Laden der Profile:", e);
+  }
+}
+
+async function applySelectedProfile() {
+  const select = document.getElementById("cfg-profile-select");
+  const profileId = select?.value;
+  if (!profileId) return;
+
+  try {
+    const res = await fetch("/api/system/profiles/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profileId })
+    });
+    const result = await res.json();
+    if (result.status === "ok") {
+      showToast("✓ Profil angewendet", `Profil "${result.applied_profile}" ist jetzt aktiv`, "good");
+      loadHardwareStatus();
+      loadSettings();
+      loadProfilesList();
+    } else {
+      showToast("Profil-Fehler", result.detail || "Profil konnte nicht angewendet werden", "warning");
+    }
+  } catch(e) {
+    showToast("Fehler", e.message, "warning");
+  }
+}
+
+async function saveCurrentAsProfile() {
+  const name = prompt("Name für das neue Standort-Profil (z.B. 'Einsatzort Waldbrand'):");
+  if (!name) return;
+  const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+
+  const rptIp = document.getElementById("cfg-repeater-ip")?.value || "192.168.0.230";
+  const usvIp = document.getElementById("cfg-usv-ip")?.value || "192.168.0.232";
+  const zteIp = document.getElementById("cfg-zte-ip")?.value || "192.168.0.1";
+  const omadaIp = document.getElementById("cfg-omada-ip")?.value || "192.168.0.1";
+
+  const payload = {
+    id: id,
+    name: name,
+    description: `Standort-Profil ${name}`,
+    settings: {
+      repeater_ip: rptIp,
+      usv_ip: usvIp,
+      zte_ip: zteIp,
+      omada_ip: omadaIp
+    }
+  };
+
+  try {
+    const res = await fetch("/api/system/profiles/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      showToast("✓ Profil gespeichert", `Profil "${name}" erfolgreich gesichert`, "good");
+      loadProfilesList();
+    }
+  } catch(e) {
+    showToast("Fehler", e.message, "warning");
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AUDIO-EINGABEGERÄTE FÜR WEB-PTT
+// ═══════════════════════════════════════════════════════════════════
+
+async function populateAudioInputDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter(d => d.kind === "audioinput");
+    const select = document.getElementById("ptt-audio-device-select");
+    if (select && audioInputs.length > 0) {
+      select.innerHTML = "";
+      audioInputs.forEach((dev, idx) => {
+        const opt = document.createElement("option");
+        opt.value = dev.deviceId;
+        opt.textContent = dev.label || `Mikrofon ${idx + 1}`;
+        select.appendChild(opt);
+      });
+      select.onchange = () => {
+        initPttAudio(select.value);
+      };
+    }
+  } catch(e) {
+    console.warn("Konnte Audiogeräte nicht auflisten:", e);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SICHERHEITSSYSTEM: FUNKGERÄTE-SPERRE, BLACKLIST & ORTUNG
+// ═══════════════════════════════════════════════════════════════════
+
+function playSecurityAlarmSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // Eindringlicher Zwei-Ton-Sirenen-Warble für Rogue-Radio Erkennung
+    const freqs = [950, 650, 950, 650, 1100, 700];
+    let t = ctx.currentTime;
+    freqs.forEach((freq) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = "sawtooth";
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.25, t + 0.02);
+      gain.gain.linearRampToValueAtTime(0, t + 0.16);
+      osc.start(t);
+      osc.stop(t + 0.18);
+      t += 0.20;
+    });
+  } catch(e) {
+    console.warn("[Security] Sirenen-Audio fehlgeschlagen:", e);
+  }
+}
+
+function onSecurityAlert(msg) {
+  playSecurityAlarmSound();
+
+  STATE.lastBlockedAlertRadio = msg.radio_id;
+
+  const banner = document.getElementById("security-alert-banner");
+  const title = document.getElementById("sec-alert-title");
+  const meta = document.getElementById("sec-alert-meta");
+
+  if (banner) {
+    banner.style.display = "flex";
+  }
+  if (title) {
+    title.textContent = `🚨 SICHERHEITSALARM: Gesperrtes Funkgerät aktiv! [${msg.alias || 'Radio ' + msg.radio_id}]`;
+  }
+  if (meta) {
+    const rssiStr = msg.rssi != null ? `${msg.rssi.toFixed(0)} dBm` : "—";
+    const reasonStr = msg.blocked_reason ? `Grund: ${msg.blocked_reason}` : "Blacklist";
+    const eventStr = msg.event_type || "Sendeaktivität";
+    meta.textContent = `ID: ${msg.radio_id} | RSSI: ${rssiStr} | ${reasonStr} | Signal: ${eventStr}`;
+  }
+
+  // Falls GPS-Daten mitgeliefert wurden, sofort auf der Karte aktualisieren
+  if (msg.lat != null && msg.lon != null) {
+    STATE.gpsPositions[msg.radio_id] = {
+      radio_id: msg.radio_id,
+      lat: msg.lat,
+      lon: msg.lon,
+      rssi: msg.rssi,
+      timestamp: new Date().toISOString()
+    };
+    if (typeof updateRadioMarker === "function") {
+      updateRadioMarker(msg.radio_id, msg.lat, msg.lon, msg.rssi);
+    }
+  }
+
+  showToast(
+    `🚨 SICHERHEITSALARM: ${msg.alias || 'Radio ' + msg.radio_id}`,
+    `Gesperrtes Funkgerät sendet (${msg.event_type})! RSSI: ${msg.rssi != null ? msg.rssi + ' dBm' : 'k.A.'}`,
+    "emergency",
+    12000
+  );
+}
+
+function onRadioBlockUpdate(msg) {
+  if (STATE.radios[msg.radio_id]) {
+    STATE.radios[msg.radio_id].is_blocked = msg.is_blocked ? 1 : 0;
+    STATE.radios[msg.radio_id].blocked_reason = msg.blocked_reason || null;
+    STATE.radios[msg.radio_id].blocked_at = msg.blocked_at || null;
+  }
+  renderRadiosTable();
+  renderSidebarUnits();
+}
+
+function updateRepeaterKnockdownButton(isKnockdown) {
+  const btn = document.getElementById("btn-repeater-knockdown");
+  if (!btn) return;
+  if (isKnockdown) {
+    btn.textContent = "▶ Freigeben";
+    btn.style.background = "#238636";
+    btn.title = "Stummschaltung aufheben und Relaisbetrieb wieder freigeben";
+  } else {
+    btn.textContent = "⛔ Stummschalten";
+    btn.style.background = "#dc2626";
+    btn.title = "Repeater Sende-Relais stummschalten (Knockdown aktiv)";
+  }
+}
+
+async function toggleRepeaterKnockdownManual() {
+  const isKnockdown = STATE.repeaterKnockdown || false;
+  const target = !isKnockdown;
+  const promptText = target
+    ? "Möchten Sie den Relais-Sender stummschalten (Knockdown aktiv)? Funkübertragungen über das Relais werden unterdrückt."
+    : "Möchten Sie die Stummschaltung aufheben und den normalen Repeater-Betrieb wieder freigeben?";
+  if (!confirm(promptText)) return;
+  try {
+    const res = await fetch("/api/hardware/repeater/knockdown", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ knockdown: target })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      STATE.repeaterKnockdown = data.knockdown;
+      updateRepeaterKnockdownButton(data.knockdown);
+      showToast(target ? "⛔ Repeater stummgeschaltet" : "✓ Repeater aktiv", data.message, target ? "warning" : "good");
+    } else {
+      showToast("Fehler", data.detail || "Konnte Knockdown-Status nicht ändern", "warning");
+    }
+  } catch (e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+function onRepeaterKnockdownChanged(msg) {
+  STATE.repeaterKnockdown = Boolean(msg.knockdown);
+  updateRepeaterKnockdownButton(msg.knockdown);
+  if (msg.knockdown) {
+    showToast("⛔ REPEATER STUMMGESCHALTET", "Knockdown-Modus aktiv: Sender unterdrückt HF-Aussendungen.", "emergency", 8000);
+  } else {
+    showToast("✓ REPEATER AKTIV", "Knockdown aufgehoben: Normaler Relaisfunkbetrieb wiederhergestellt.", "good", 5000);
+  }
+}
+
+function dismissSecurityAlert() {
+  const banner = document.getElementById("security-alert-banner");
+  if (banner) banner.style.display = "none";
+}
+
+function locateBlockedRadio() {
+  if (!STATE.lastBlockedAlertRadio) {
+    showToast("Ortung", "Keine kürzlich alarmierte Radio-ID bekannt.", "info");
+    return;
+  }
+  focusOnMap(STATE.lastBlockedAlertRadio);
+}
+
+async function quickKnockdownFromAlert() {
+  if (!confirm("Möchten Sie den Relais-Sender SOFORT stummschalten (Knockdown aktiv)? Dadurch werden alle Aussendungen unterbunden.")) {
+    return;
+  }
+  try {
+    const res = await fetch("/api/hardware/repeater/knockdown", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ knockdown: true })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast("⛔ Repeater stummgeschaltet", "Repeating-Knockdown erfolgreich ausgelöst.", "warning", 6000);
+    } else {
+      showToast("Fehler bei Knockdown", data.detail || "Konnte Relais nicht stummschalten", "warning");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+function openRadioBlockModal(radioId) {
+  STATE.modalTargetRadioId = radioId;
+  const radio = STATE.radios[radioId];
+  const modal = document.getElementById("modal-radio-block");
+  const info = document.getElementById("modal-radio-block-info");
+  const warning = document.getElementById("block-model-warning");
+  const stunBtn = document.getElementById("btn-ota-stun");
+  const select = document.getElementById("radio-block-reason-select");
+  const customInput = document.getElementById("radio-block-reason-custom");
+
+  if (!modal) return;
+
+  if (info) {
+    info.innerHTML = `<strong>Gerät:</strong> ${radio?.alias || 'Radio ' + radioId} (ID: ${radioId}) | Modell: ${radio?.device_model || 'Unbekannt'}`;
+  }
+
+  const isRt81 = (radio?.device_model || "").toLowerCase().includes("rt81");
+  if (warning) {
+    warning.style.display = isRt81 ? "block" : "none";
+  }
+  if (stunBtn) {
+    stunBtn.style.display = isRt81 ? "none" : "inline-flex";
+  }
+
+  if (select) select.value = "Verlust an Einsatzstelle";
+  if (customInput) {
+    customInput.value = "";
+    customInput.style.display = "none";
+  }
+
+  modal.style.display = "flex";
+}
+
+function closeRadioBlockModal() {
+  const modal = document.getElementById("modal-radio-block");
+  if (modal) modal.style.display = "none";
+  STATE.modalTargetRadioId = null;
+}
+
+function onRadioBlockReasonChange() {
+  const select = document.getElementById("radio-block-reason-select");
+  const customInput = document.getElementById("radio-block-reason-custom");
+  if (!select || !customInput) return;
+  customInput.style.display = select.value === "custom" ? "block" : "none";
+}
+
+async function submitRadioBlock() {
+  const radioId = STATE.modalTargetRadioId;
+  if (!radioId) return;
+
+  const select = document.getElementById("radio-block-reason-select");
+  const customInput = document.getElementById("radio-block-reason-custom");
+  let reason = select ? select.value : "Gesperrt";
+  if (reason === "custom" && customInput && customInput.value.trim()) {
+    reason = customInput.value.trim();
+  }
+
+  try {
+    const res = await fetch(`/api/radios/${radioId}/block`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_blocked: true, reason: reason })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (STATE.radios[radioId]) {
+        STATE.radios[radioId].is_blocked = 1;
+        STATE.radios[radioId].blocked_reason = reason;
+        STATE.radios[radioId].blocked_at = new Date().toISOString();
+      }
+      renderRadiosTable();
+      renderSidebarUnits();
+      closeRadioBlockModal();
+      showToast("🚫 Funkgerät gesperrt", `${data.alias || 'Radio ' + radioId} zur Blacklist hinzugefügt.`, "warning", 5000);
+    } else {
+      showToast("Fehler beim Sperren", data.detail || "Konnte Funkgerät nicht sperren", "warning");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+async function unblockRadio(radioId) {
+  if (!confirm(`Sperre für Funkgerät ${STATE.radios[radioId]?.alias || radioId} wirklich aufheben?`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/radios/${radioId}/block`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_blocked: false })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (STATE.radios[radioId]) {
+        STATE.radios[radioId].is_blocked = 0;
+        STATE.radios[radioId].blocked_reason = null;
+        STATE.radios[radioId].blocked_at = null;
+      }
+      renderRadiosTable();
+      renderSidebarUnits();
+      showToast("🔓 Funkgerät freigegeben", `${data.alias || 'Radio ' + radioId} wurde entsperrt.`, "good", 5000);
+    } else {
+      showToast("Fehler beim Entsperren", data.detail || "Konnte Funkgerät nicht entsperren", "warning");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+async function triggerOtaStunFromModal() {
+  const radioId = STATE.modalTargetRadioId;
+  if (!radioId) return;
+
+  const radio = STATE.radios[radioId];
+  if (!confirm(`DMR CSBK Radio Disable Frame per Funk an ${radio?.alias || 'Radio ' + radioId} senden?`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/radios/${radioId}/ota_stun`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (data.status === "warning") {
+        showToast("⚠️ Hinweis", data.message, "warning", 7000);
+      } else {
+        showToast("⚡ OTA-Stun gesendet", `DMR CSBK Radio Disable Frame an ID ${radioId} übertragen.`, "good", 6000);
+      }
+    } else {
+      showToast("OTA-Stun Fehler", data.detail || "Fehler beim Senden des Stun-Befehls", "warning");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FESTE POSITIONEN FÜR FUNKGERÄTE (Z.B. RETEVIS RT81 / FESTSTATIONEN)
+// ═══════════════════════════════════════════════════════════════════
+
+function startSetRadioPosition(radioId) {
+  STATE.settingRadioPositionId = radioId;
+  const radio = STATE.radios[radioId];
+  switchTab("map");
+  const mapEl = document.getElementById("map");
+  if (mapEl) mapEl.style.cursor = "crosshair";
+  showToast(
+    "📍 Feste Position festlegen",
+    `Klicke auf die Karte, um den Standort für ${radio?.alias || 'Radio ' + radioId} zu platzieren (oder ESC zum Abbrechen).`,
+    "info",
+    8000
+  );
+}
+
+async function saveRadioFixedPosition(radioId, lat, lon) {
+  try {
+    const res = await fetch(`/api/radios/${radioId}/position`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lat, lon })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (STATE.radios[radioId]) {
+        STATE.radios[radioId].fixed_lat = lat;
+        STATE.radios[radioId].fixed_lon = lon;
+        STATE.radios[radioId].last_lat = lat;
+        STATE.radios[radioId].last_lon = lon;
+      }
+      STATE.gpsPositions[radioId] = {
+        radio_id: radioId,
+        lat: lat,
+        lon: lon,
+        rssi: STATE.radios[radioId]?.last_rssi,
+        is_fixed: true,
+        timestamp: new Date().toISOString()
+      };
+      updateMapMarker(radioId, STATE.gpsPositions[radioId]);
+      renderRadiosTable();
+      showToast(
+        "✓ Feste Position gespeichert",
+        `${STATE.radios[radioId]?.alias || 'Radio ' + radioId} auf Karte fixiert (${lat.toFixed(5)}, ${lon.toFixed(5)})`,
+        "good"
+      );
+      if (STATE.mapMarkers[radioId]) {
+        STATE.mapMarkers[radioId].openPopup();
+      }
+    } else {
+      showToast("Fehler", data.detail || "Position konnte nicht gespeichert werden", "warning");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+async function clearRadioFixedPosition(radioId) {
+  if (!confirm(`Feste Position für ${STATE.radios[radioId]?.alias || 'Radio ' + radioId} wirklich entfernen?`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/radios/${radioId}/position`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lat: null, lon: null })
+    });
+    if (res.ok) {
+      if (STATE.radios[radioId]) {
+        STATE.radios[radioId].fixed_lat = null;
+        STATE.radios[radioId].fixed_lon = null;
+      }
+      if (STATE.gpsPositions[radioId]?.is_fixed) {
+        delete STATE.gpsPositions[radioId];
+        if (STATE.mapMarkers[radioId]) {
+          STATE.map?.removeLayer(STATE.mapMarkers[radioId]);
+          delete STATE.mapMarkers[radioId];
+        }
+      }
+      renderRadiosTable();
+      showToast("Position entfernt", `${STATE.radios[radioId]?.alias || 'Radio ' + radioId} hat keine feste Position mehr`, "info");
+    }
+  } catch(e) {
+    showToast("Netzwerkfehler", String(e), "warning");
+  }
+}
+
+
+
 
 

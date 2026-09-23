@@ -100,7 +100,7 @@ def main():
         "backend.main:app",
         host         = host,
         port         = port,
-        reload       = False,
+        reload       = True,
         log_level    = "info",
         access_log   = True,
         workers      = 1,

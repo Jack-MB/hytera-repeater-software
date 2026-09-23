@@ -78,6 +78,9 @@ class DatabaseManager:
                     is_emergency   INTEGER DEFAULT 0,
                     emergency_since TEXT   DEFAULT NULL,
                     emergency_type TEXT    DEFAULT NULL,
+                    is_blocked     INTEGER DEFAULT 0,
+                    blocked_reason TEXT    DEFAULT NULL,
+                    blocked_at     TEXT    DEFAULT NULL,
                     online         INTEGER DEFAULT 0,
                     last_rssi      REAL    DEFAULT NULL
                 );
@@ -93,6 +96,9 @@ class DatabaseManager:
                 ("is_emergency",    "INTEGER DEFAULT 0"),
                 ("emergency_since", "TEXT    DEFAULT NULL"),
                 ("emergency_type",  "TEXT    DEFAULT NULL"),
+                ("is_blocked",      "INTEGER DEFAULT 0"),
+                ("blocked_reason",  "TEXT    DEFAULT NULL"),
+                ("blocked_at",      "TEXT    DEFAULT NULL"),
                 ("online",          "INTEGER DEFAULT 0"),
                 ("last_rssi",       "REAL    DEFAULT NULL"),
             ]:
@@ -366,6 +372,7 @@ class DatabaseManager:
                     r.radio_id, r.alias, r.device_model, r.last_seen,
                     r.has_gps, r.fixed_lat, r.fixed_lon, r.floor_level,
                     r.is_emergency, r.emergency_since, r.emergency_type,
+                    r.is_blocked, r.blocked_reason, r.blocked_at,
                     r.online, r.last_rssi,
                     g.lat       AS last_lat,
                     g.lon       AS last_lon,
@@ -395,6 +402,9 @@ class DatabaseManager:
                 "is_emergency":   bool(r["is_emergency"]),
                 "emergency_since": r["emergency_since"],
                 "emergency_type": r["emergency_type"],
+                "is_blocked":     bool(r["is_blocked"]),
+                "blocked_reason": r["blocked_reason"] or "",
+                "blocked_at":     r["blocked_at"],
                 "online":         bool(r["online"]),
                 "last_rssi":      r["last_rssi"],
                 "last_lat":       r["last_lat"],
@@ -416,6 +426,44 @@ class DatabaseManager:
             cur = await db.execute("DELETE FROM radios WHERE radio_id = ?;", (radio_id,))
             await db.commit()
             return cur.rowcount > 0
+
+    async def set_radio_blocked(self, radio_id: int, is_blocked: bool, reason: str = "") -> Dict[str, Any]:
+        """Sperrt oder entsperrt ein Funkgerät (z.B. Verlust/Diebstahl)."""
+        ts = get_current_iso_timestamp() if is_blocked else None
+        reason_str = reason.strip() if is_blocked else ""
+        async with self.get_connection() as db:
+            await db.execute("""
+                UPDATE radios
+                SET is_blocked = ?, blocked_reason = ?, blocked_at = ?
+                WHERE radio_id = ?;
+            """, (int(is_blocked), reason_str, ts, radio_id))
+            await db.commit()
+            cur = await db.execute("SELECT alias, device_model FROM radios WHERE radio_id = ?;", (radio_id,))
+            row = await cur.fetchone()
+        alias = row["alias"] if row else f"Radio {radio_id}"
+        model = row["device_model"] if row else ""
+        return {
+            "radio_id": radio_id,
+            "alias": alias,
+            "device_model": model,
+            "is_blocked": is_blocked,
+            "blocked_reason": reason_str,
+            "blocked_at": ts
+        }
+
+    async def is_radio_blocked(self, radio_id: int) -> bool:
+        """Prüft schnell, ob ein Funkgerät gesperrt ist."""
+        async with self.get_connection() as db:
+            cur = await db.execute("SELECT is_blocked FROM radios WHERE radio_id = ?;", (radio_id,))
+            row = await cur.fetchone()
+            if row:
+                return bool(row["is_blocked"])
+        return False
+
+    async def get_blocked_radios(self) -> List[Dict[str, Any]]:
+        """Gibt alle aktuell gesperrten Funkgeräte zurück."""
+        radios = await self.get_radios()
+        return [r for r in radios if r.get("is_blocked")]
 
     async def set_radio_gps(self, radio_id: int, has_gps: bool) -> None:
         async with self.get_connection() as db:

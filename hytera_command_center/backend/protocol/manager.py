@@ -216,6 +216,19 @@ class UDPManager:
     def is_mock_active(self) -> bool:
         return self.enable_mock and bool(self._mock_task and not self._mock_task.done())
 
+    def send_to_repeater(self, data: bytes, port: int, repeater_ip: Optional[str] = None) -> bool:
+        """Sendet ein UDP-Paket über den bestehenden gebundenen Port-Transport."""
+        proto = self._protocols.get(port)
+        target_ip = repeater_ip or REPEATER_IP
+        if proto and proto.transport and not proto.transport.is_closing():
+            try:
+                proto.transport.sendto(data, (target_ip, port))
+                return True
+            except Exception as exc:
+                logger.error(f"Fehler beim Senden an Repeater {target_ip}:{port}: {exc}")
+                return False
+        return False
+
     def get_port_stats(self) -> List[Dict[str, Any]]:
         """Gibt Statistiken aller aktiven Ports zurück."""
         stats = []

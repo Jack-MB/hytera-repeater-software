@@ -17,23 +17,26 @@ WebSocket Event-Typen (Server → Client):
 """
 
 import asyncio
+import json
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, Body
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 try:
     from .config import (
-        FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR,
+        FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR, ROOT_DIR,
         DEFAULT_SETTINGS, UPS_IP, UPS_MODBUS_PORT, ZTE_IP, OMADA_IP,
-        REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT,
+        REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT, DEFAULT_MAP_CENTER,
     )
     from .db_manager import DatabaseManager, db_manager
     from .protocol.manager import UDPManager
@@ -42,12 +45,16 @@ try:
     from .hardware.ups_modbus import UPSMonitor
     from .hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
     from .services.audio_recorder import AudioRecorder
+    from .protocol.tx_sender import HyteraTxSender
+    from .hardware.subnet_scanner import get_local_ip_and_subnet, scan_subnet, SubnetScanner
+    from .utils.qrcode_gen import generate_qr_svg
+    from .utils.tile_cache import prefetch_tiles_for_area, get_cache_stats, TileCacheManager
 except ImportError:
     try:
         from backend.config import (
-            FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR,
+            FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR, ROOT_DIR,
             DEFAULT_SETTINGS, UPS_IP, UPS_MODBUS_PORT, ZTE_IP, OMADA_IP,
-            REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT,
+            REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT, DEFAULT_MAP_CENTER,
         )
         from backend.db_manager import DatabaseManager, db_manager
         from backend.protocol.manager import UDPManager
@@ -56,11 +63,15 @@ except ImportError:
         from backend.hardware.ups_modbus import UPSMonitor
         from backend.hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
         from backend.services.audio_recorder import AudioRecorder
+        from backend.protocol.tx_sender import HyteraTxSender
+        from backend.hardware.subnet_scanner import get_local_ip_and_subnet, scan_subnet, SubnetScanner
+        from backend.utils.qrcode_gen import generate_qr_svg
+        from backend.utils.tile_cache import prefetch_tiles_for_area, get_cache_stats, TileCacheManager
     except ImportError:
         from config import (
-            FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR,
+            FRONTEND_DIR, STATIC_DIR, UPLOADS_DIR, TILES_DIR, RECORDINGS_DIR, ROOT_DIR,
             DEFAULT_SETTINGS, UPS_IP, UPS_MODBUS_PORT, ZTE_IP, OMADA_IP,
-            REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT,
+            REPEATER_IP, SNMP_TRAP_PORT, HTTP_HOST, HTTP_PORT, DEFAULT_MAP_CENTER,
         )
         from db_manager import DatabaseManager, db_manager
         from protocol.manager import UDPManager
@@ -69,6 +80,10 @@ except ImportError:
         from hardware.ups_modbus import UPSMonitor
         from hardware.router_monitor import ZTEMonitor, OmadaER606Monitor
         from services.audio_recorder import AudioRecorder
+        from protocol.tx_sender import HyteraTxSender
+        from hardware.subnet_scanner import get_local_ip_and_subnet, scan_subnet, SubnetScanner
+        from utils.qrcode_gen import generate_qr_svg
+        from utils.tile_cache import prefetch_tiles_for_area, get_cache_stats, TileCacheManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,6 +140,7 @@ _ups_monitor:   Optional[UPSMonitor]       = None
 _zte_monitor:   Optional[ZTEMonitor]       = None
 _omada_monitor: Optional[OmadaER606Monitor] = None
 _audio_recorder: Optional[AudioRecorder]   = None
+_tx_sender:      Optional[HyteraTxSender]   = None
 
 
 def get_repeater_full_state() -> Dict[str, Any]:
@@ -162,12 +178,154 @@ def get_repeater_full_state() -> Dict[str, Any]:
     return state
 
 
+# ── Geofence-Zonenüberwachung ───────────────────────────────────────────────
+_radio_zone_states: Dict[Tuple[int, int], bool] = {}  # (radio_id, geofence_id) -> is_inside
+
+
+def _haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Berechnet die Entfernung zweier Koordinaten in Metern (Haversine-Formel)."""
+    R = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = (math.sin(delta_phi / 2.0) ** 2 +
+         math.cos(phi1) * math.cos(phi2) * (math.sin(delta_lambda / 2.0) ** 2))
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+
+def _is_point_in_polygon(lat: float, lon: float, poly_coords: List[List[float]]) -> bool:
+    """Prüft ob (lat, lon) innerhalb eines Polygons liegt (Ray-Casting Algorithmus)."""
+    if not poly_coords or len(poly_coords) < 3:
+        return False
+    inside = False
+    n = len(poly_coords)
+    p1x, p1y = poly_coords[0][0], poly_coords[0][1]
+    for i in range(1, n + 1):
+        p2x, p2y = poly_coords[i % n][0], poly_coords[i % n][1]
+        if min(p1y, p2y) < lon <= max(p1y, p2y):
+            if lat <= max(p1x, p2x):
+                if p1y != p2y:
+                    xinters = (lon - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or lat <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+
+async def _check_geofence_breaches(radio_id: int, lat: float, lon: float) -> None:
+    """
+    Überprüft, ob ein Funkgerät Zonen (Gefahrenbereiche, Einsatzabschnitte) betritt oder verlässt.
+    Löst bei Statuswechsel entsprechende WebSocket-Alerts aus.
+    """
+    geofences = await db_manager.get_geofences()
+    radio = await db_manager.get_radio(radio_id) or {}
+    alias = radio.get("alias", f"Radio {radio_id}")
+
+    for gf in geofences:
+        gf_id = gf["id"]
+        gf_name = gf.get("name", f"Zone #{gf_id}")
+        zone_type = gf.get("zone_type", "danger")
+        shape = gf.get("shape", "circle")
+
+        is_inside = False
+        if shape == "circle":
+            c_lat = gf.get("center_lat")
+            c_lon = gf.get("center_lon")
+            radius_m = gf.get("radius_m", 100.0)
+            if c_lat is not None and c_lon is not None:
+                dist = _haversine_distance_m(lat, lon, c_lat, c_lon)
+                is_inside = (dist <= radius_m)
+        elif shape == "polygon":
+            coords = gf.get("polygon_coords") or []
+            is_inside = _is_point_in_polygon(lat, lon, coords)
+
+        state_key = (radio_id, gf_id)
+        was_inside = _radio_zone_states.get(state_key, False)
+
+        if not was_inside and is_inside:
+            _radio_zone_states[state_key] = True
+            is_danger = zone_type in ("danger", "restricted")
+            breach_event = {
+                "type": "zone_breach",
+                "alert_type": "zone_enter",
+                "severity": "danger" if is_danger else "info",
+                "zone_id": gf_id,
+                "zone_name": gf_name,
+                "zone_type": zone_type,
+                "radio_id": radio_id,
+                "alias": alias,
+                "lat": lat,
+                "lon": lon,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": (
+                    f"🚨 GEFAHRENZONE: {alias} hat den Gefahrenbereich '{gf_name}' BETRETEN!"
+                    if is_danger else
+                    f"📍 ZONE BETRETEN: {alias} befindet sich jetzt in '{gf_name}'."
+                )
+            }
+            logger.warning(f"Geofence-Ereignis: {breach_event['message']}")
+            await ws_manager.broadcast(breach_event)
+
+        elif was_inside and not is_inside:
+            _radio_zone_states[state_key] = False
+            is_op = zone_type == "operational"
+            breach_event = {
+                "type": "zone_breach",
+                "alert_type": "zone_exit",
+                "severity": "warning" if is_op else "info",
+                "zone_id": gf_id,
+                "zone_name": gf_name,
+                "zone_type": zone_type,
+                "radio_id": radio_id,
+                "alias": alias,
+                "lat": lat,
+                "lon": lon,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": (
+                    f"⚠️ ABSCHNITT VERLASSEN: {alias} hat den Einsatzbereich '{gf_name}' verlassen!"
+                    if is_op else
+                    f"ℹ️ ZONE VERLASSEN: {alias} hat '{gf_name}' verlassen."
+                )
+            }
+            logger.info(f"Geofence-Ereignis: {breach_event['message']}")
+            await ws_manager.broadcast(breach_event)
+
+
 async def _broadcast_event(event: Dict[str, Any]) -> None:
     """
     Master-Callback: Empfängt Events von allen Subsystemen
     und persistiert/broadcastet sie.
     """
     ev_type = event.get("type", "")
+    radio_id_for_check = event.get("radio_id") or event.get("sender_id")
+
+    # Sicherheits-Check: Aktivität gesperrter Funkgeräte abfangen
+    if radio_id_for_check and ev_type in ("ptt_start", "ptt_end", "gps", "rrs_register", "sms_received"):
+        try:
+            if await db_manager.is_radio_blocked(radio_id_for_check):
+                r_info = await db_manager.get_radio(radio_id_for_check) or {}
+                sec_event = {
+                    "type": "security_alert",
+                    "alert_type": "blocked_radio_activity",
+                    "radio_id": radio_id_for_check,
+                    "alias": r_info.get("alias", f"Radio {radio_id_for_check}"),
+                    "device_model": r_info.get("device_model", ""),
+                    "blocked_reason": r_info.get("blocked_reason", ""),
+                    "blocked_at": r_info.get("blocked_at"),
+                    "event_type": ev_type,
+                    "rssi": event.get("rssi") if event.get("rssi") is not None else r_info.get("last_rssi"),
+                    "lat": event.get("lat") if event.get("lat") is not None else r_info.get("last_lat"),
+                    "lon": event.get("lon") if event.get("lon") is not None else r_info.get("last_lon"),
+                    "timestamp": event.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    "slot": event.get("slot", "TS1"),
+                    "message": f"🚨 SICHERHEITSALARM: Gesperrtes Funkgerät [{r_info.get('alias', radio_id_for_check)}] ist aktiv! (Aktion: {ev_type})"
+                }
+                logger.warning("SICHERHEITSALARM: Gesperrtes Funkgerät %s aktiv (Event=%s)", radio_id_for_check, ev_type)
+                await ws_manager.broadcast(sec_event)
+        except Exception as sec_exc:
+            logger.debug("Fehler beim Security-Check: %s", sec_exc)
 
     # GPS → Datenbank + WebSocket
     if ev_type == "gps":
@@ -187,6 +345,11 @@ async def _broadcast_event(event: Dict[str, Any]) -> None:
             )
             if event.get("rssi") is not None:
                 await db_manager.set_radio_rssi(radio_id, event["rssi"])
+            # Zonenüberwachung (Gefahrenbereich/Einsatzabschnitt)
+            try:
+                await _check_geofence_breaches(radio_id, lat, lon)
+            except Exception as gf_exc:
+                logger.debug(f"Fehler bei Zonenprüfung: {gf_exc}")
         await ws_manager.broadcast(event)
 
     # PTT-Start → WebSocket
@@ -314,9 +477,7 @@ async def _broadcast_event(event: Dict[str, Any]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startet/Stoppt alle Background-Services."""
-    global _udp_manager, _snmp_monitor, _ups_monitor, _zte_monitor, _omada_monitor, _audio_recorder
-    global _udp_manager, _snmp_monitor, _snmp_poller, _ups_monitor, _zte_monitor, _omada_monitor, _audio_recorder
+    global _udp_manager, _snmp_monitor, _snmp_poller, _ups_monitor, _zte_monitor, _omada_monitor, _audio_recorder, _tx_sender
 
     # DB initialisieren
     await db_manager.init_db()
@@ -459,6 +620,30 @@ async def lifespan(app: FastAPI):
     )
     await _audio_recorder.start()
 
+    # IP-TX-Transmitter (Sprach- & PTT-Aussendung an Repeater)
+    def _send_tx_udp(data: bytes, addr: tuple) -> None:
+        port = addr[1]
+        if _udp_manager and _udp_manager.send_to_repeater(data, port, repeater_ip=addr[0]):
+            return
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(data, addr)
+            sock.close()
+        except Exception as exc:
+            logger.error(f"TX Sende-Fehler an {addr}: {exc}")
+
+    async def _on_tx_state_changed(state: Dict[str, Any]) -> None:
+        state["type"] = "tx_state_changed"
+        await ws_manager.broadcast(state)
+
+    _tx_sender = HyteraTxSender(
+        repeater_ip     = repeater_ip,
+        send_udp_func   = _send_tx_udp,
+        tot_timeout_s   = 60.0,
+        on_state_change = _on_tx_state_changed,
+    )
+    logger.info("IP-TX-Transmitter bereit.")
+
     import socket
     local_lan_ip = "127.0.0.1"
     try:
@@ -480,6 +665,8 @@ async def lifespan(app: FastAPI):
     # Cleanup
     logger.info("Shutdown...")
     _status_task.cancel()
+    if _tx_sender and _tx_sender.is_transmitting:
+        await _tx_sender.stop_tx()
     if _audio_recorder: _audio_recorder.stop()
     if _udp_manager:   await _udp_manager.stop()
     if _snmp_monitor:  _snmp_monitor.stop()
@@ -520,16 +707,18 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Initiale Daten nach Verbindungsaufbau senden
     try:
-        radios   = await db_manager.get_radios()
-        gps_data = await db_manager.get_recent_gps()
-        calls    = await db_manager.get_recent_calls(20)
-        markers  = await db_manager.get_markers()
-        settings = {**DEFAULT_SETTINGS, **await db_manager.get_all_settings()}
-        mission  = await db_manager.get_mission_data()
-        snmp_evs = await db_manager.get_snmp_events(50)
+        radios    = await db_manager.get_radios()
+        gps_data  = await db_manager.get_recent_gps()
+        calls     = await db_manager.get_recent_calls(20)
+        markers   = await db_manager.get_markers()
+        geofences = await db_manager.get_geofences()
+        settings  = {**DEFAULT_SETTINGS, **await db_manager.get_all_settings()}
+        mission   = await db_manager.get_mission_data()
+        snmp_evs  = await db_manager.get_snmp_events(50)
 
         await ws.send_json({"type": "init", "radios": radios, "gps": gps_data,
                             "calls": calls, "markers": markers,
+                            "geofences": geofences,
                             "settings": settings, "mission": mission,
                             "snmp_events": snmp_evs})
 
@@ -554,13 +743,36 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception as e:
             logger.debug(f"WS Init Repeater: {e}")
 
+        # Aktueller TX-Sendestatus
+        if _tx_sender:
+            try:
+                await ws.send_json({"type": "tx_state_changed", **_tx_sender.get_status()})
+            except Exception as e:
+                logger.debug(f"WS Init TX: {e}")
+
         # Verbindung offenhalten
         while True:
             try:
                 msg = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
-                # Client-Ping-Pong
+                # Client-Ping-Pong & PTT-Befehle
                 if msg == "ping":
                     await ws.send_text("pong")
+                elif msg.startswith("{"):
+                    import json
+                    try:
+                        cmd = json.loads(msg)
+                        action = cmd.get("action")
+                        if action == "ptt_press" and _tx_sender:
+                            slot = cmd.get("slot", "TS1")
+                            target_id = int(cmd.get("target_id", 1))
+                            call_type = int(cmd.get("call_type", 1))
+                            success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
+                            await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})
+                        elif action == "ptt_release" and _tx_sender:
+                            await _tx_sender.stop_tx()
+                            await ws.send_json({"type": "ptt_ack", "action": "release", "success": True})
+                    except Exception as e:
+                        logger.debug(f"WS CMD Parse: {e}")
             except asyncio.TimeoutError:
                 await ws.send_text("ping")
             except WebSocketDisconnect:
@@ -628,6 +840,75 @@ async def ack_emergency(radio_id: int):
     return result
 
 
+@app.get("/api/radios/blocked")
+async def get_blocked_radios():
+    radios = await db_manager.get_blocked_radios()
+    return {"status": "ok", "count": len(radios), "blocked_radios": radios}
+
+
+@app.post("/api/radios/{radio_id}/block")
+async def set_radio_block_status(radio_id: int, data: Dict[str, Any] = Body(default={})):
+    if "is_blocked" in data:
+        is_blocked = bool(data["is_blocked"])
+    elif "blocked" in data:
+        is_blocked = bool(data["blocked"])
+    else:
+        is_blocked = True
+    reason = str(data.get("reason", "Verlust / Sperre")) if is_blocked else None
+    res = await db_manager.set_radio_blocked(radio_id, is_blocked, reason)
+    alias = res.get("alias", f"Radio {radio_id}") if res else f"Radio {radio_id}"
+    await ws_manager.broadcast({
+        "type": "radio_block_update",
+        "radio_id": radio_id,
+        "is_blocked": is_blocked,
+        "blocked_reason": res.get("blocked_reason", "") if res else "",
+        "blocked_at": res.get("blocked_at") if res else None,
+        "alias": alias
+    })
+    return {"status": "ok", "ok": True, "radio_id": radio_id, "is_blocked": is_blocked, **(res or {})}
+
+
+@app.post("/api/radios/{radio_id}/ota_stun")
+async def send_ota_stun(radio_id: int, data: Dict[str, Any] = Body(default={})):
+    slot = str(data.get("slot", "TS1")).upper()
+    radio = await db_manager.get_radio(radio_id)
+    model = (radio.get("device_model", "") if radio else "").upper()
+    is_rt81 = "RT81" in model
+
+    sent = False
+    if _tx_sender:
+        sent = await _tx_sender.send_radio_disable(radio_id, slot=slot)
+
+    # Automatisch auch im System auf gesperrt setzen
+    block_res = await db_manager.set_radio_blocked(radio_id, True, f"OTA-Stun gesendet ({slot})")
+    await ws_manager.broadcast({
+        "type": "radio_block_update",
+        "radio_id": radio_id,
+        "is_blocked": True,
+        "blocked_reason": f"OTA-Stun gesendet ({slot})",
+        "alias": radio.get("alias", f"Radio {radio_id}") if radio else f"Radio {radio_id}"
+    })
+
+    note = (
+        "Hinweis: Retevis RT81 ignoriert Funk-Stun bauartbedingt. Das Gerät wurde in der Leitebene gesperrt."
+        if is_rt81 else
+        f"DMR CSBK Radio Disable wurde über das Relais auf {slot} ausgesendet."
+    )
+    status = "warning" if is_rt81 else "ok"
+    return {
+        "ok": True,
+        "status": status,
+        "radio_id": radio_id,
+        "is_blocked": True,
+        "sent_over_air": sent,
+        "slot": slot,
+        "device_model": model,
+        "is_rt81": is_rt81,
+        "message": note,
+        "note": note
+    }
+
+
 @app.put("/api/radios/{radio_id}/floor")
 async def set_floor(radio_id: int, data: Dict[str, Any] = Body(...)):
     floor = data.get("floor_level", "EG")
@@ -646,8 +927,13 @@ async def set_position(radio_id: int, data: Dict[str, Any] = Body(...)):
             "type": "gps", "radio_id": radio_id, "lat": lat, "lon": lon,
             "speed": 0, "heading": 0, "rssi": None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "is_fixed": True,
         })
-    return {"ok": True}
+    else:
+        await ws_manager.broadcast({
+            "type": "radio_position_cleared", "radio_id": radio_id
+        })
+    return {"ok": True, "radio_id": radio_id, "fixed_lat": lat, "fixed_lon": lon}
 
 
 # ── REST: GPS ─────────────────────────────────────────────────────────────────
@@ -706,6 +992,41 @@ async def send_sms(data: Dict[str, Any] = Body(...)):
     }
     await ws_manager.broadcast(event)
     return {"ok": True, "id": sms_id}
+
+
+@app.post("/api/sms/broadcast")
+async def broadcast_sms(data: Dict[str, Any] = Body(...)):
+    """Sendet einen SMS-Rundruf an alle Funkgeräte (All-Call ID 16777215)."""
+    sender_id = data.get("sender_id", 0)
+    text      = data.get("text", "")
+    if not text:
+        raise HTTPException(400, "Text erforderlich")
+    ALL_CALL_ID = 16777215
+    sms_id = await db_manager.insert_sms(
+        sender_id = sender_id,
+        target_id = ALL_CALL_ID,
+        text      = text,
+        direction = "outgoing",
+    )
+    event = {
+        "type":         "sms_received",
+        "id":           sms_id,
+        "sender_id":    sender_id,
+        "target_id":    ALL_CALL_ID,
+        "text":         text,
+        "direction":    "outgoing",
+        "is_broadcast": True,
+        "timestamp":    datetime.now(timezone.utc).isoformat(),
+    }
+    await ws_manager.broadcast(event)
+    return {
+        "ok": True,
+        "status": "ok",
+        "id": sms_id,
+        "target_id": ALL_CALL_ID,
+        "is_broadcast": True
+    }
+
 
 
 # ── REST: Radio-Ereignisse ────────────────────────────────────────────────────
@@ -814,15 +1135,27 @@ async def create_geofence(data: Dict[str, Any] = Body(...)):
         radius_m       = data.get("radius_m", 100.0),
         polygon_coords = data.get("polygon_coords"),
     )
-    gf = {"id": gf_id, **data}
+    gf = {
+        "id": gf_id,
+        "name": data.get("name", "Geofence"),
+        "zone_type": data.get("zone_type", "danger"),
+        "shape": data.get("shape", "circle"),
+        "center_lat": data.get("center_lat"),
+        "center_lon": data.get("center_lon"),
+        "radius_m": data.get("radius_m", 100.0),
+        "polygon_coords": data.get("polygon_coords"),
+    }
     await ws_manager.broadcast({"type": "geofence_added", "geofence": gf})
-    return {"ok": True, "id": gf_id}
+    return {"ok": True, "id": gf_id, "geofence": gf}
 
 
 @app.delete("/api/geofences/{gf_id}")
 async def delete_geofence(gf_id: int):
     ok = await db_manager.delete_geofence(gf_id)
     if ok:
+        keys_to_remove = [k for k in _radio_zone_states.keys() if k[1] == gf_id]
+        for k in keys_to_remove:
+            _radio_zone_states.pop(k, None)
         await ws_manager.broadcast({"type": "geofence_deleted", "id": gf_id})
     return {"ok": ok}
 
@@ -848,6 +1181,84 @@ async def get_snmp_events(limit: int = 100):
 
 # ── REST: Einstellungen ───────────────────────────────────────────────────────
 
+def _apply_runtime_settings(data: Dict[str, Any]):
+    """Wendet geänderte Netzwerk- und Hardware-IPs live auf aktive Poller an."""
+    global _snmp_poller, _ups_monitor, _tx_sender, _zte_monitor, _omada_monitor
+    if "hw_repeater_ip" in data:
+        new_rip = str(data["hw_repeater_ip"]).strip()
+        if _snmp_poller:
+            _snmp_poller.repeater_ip = new_rip
+        if _tx_sender:
+            _tx_sender.repeater_ip = new_rip
+    if "hw_usv_ip" in data and _ups_monitor:
+        _ups_monitor.host = str(data["hw_usv_ip"]).strip()
+    if "hw_usv_port" in data and _ups_monitor:
+        try:
+            _ups_monitor.port = int(data["hw_usv_port"])
+        except (ValueError, TypeError):
+            pass
+    if "hw_zte_ip" in data and _zte_monitor:
+        _zte_monitor.host = str(data["hw_zte_ip"]).strip()
+    if "hw_omada_ip" in data and _omada_monitor:
+        _omada_monitor.host = str(data["hw_omada_ip"]).strip()
+
+
+DEFAULT_PROFILES = [
+    {
+        "id": "koffer",
+        "name": "Einsatzkoffer / Autark (192.168.0.x)",
+        "description": "Standard-Feldnetzwerk für autarken Betrieb",
+        "settings": {
+            "hw_repeater_ip": "192.168.0.230",
+            "hw_repeater_trap_port": 10162,
+            "hw_usv_ip": "192.168.0.232",
+            "hw_usv_port": 502,
+            "hw_zte_ip": "192.168.0.1",
+            "hw_omada_ip": "192.168.0.1",
+        }
+    },
+    {
+        "id": "wache",
+        "name": "Wache / Festinstallation (192.168.178.x)",
+        "description": "Stationäres Netzwerk auf der Feuerwache / Zentrale",
+        "settings": {
+            "hw_repeater_ip": "192.168.178.230",
+            "hw_repeater_trap_port": 10162,
+            "hw_usv_ip": "192.168.178.232",
+            "hw_usv_port": 502,
+            "hw_zte_ip": "192.168.178.1",
+            "hw_omada_ip": "192.168.178.1",
+        }
+    },
+    {
+        "id": "hotspot",
+        "name": "Feld-Hotspot (192.168.8.x)",
+        "description": "Mobiler WLAN-Hotspot / Notfall-Router",
+        "settings": {
+            "hw_repeater_ip": "192.168.8.230",
+            "hw_repeater_trap_port": 10162,
+            "hw_usv_ip": "192.168.8.232",
+            "hw_usv_port": 502,
+            "hw_zte_ip": "192.168.8.1",
+            "hw_omada_ip": "192.168.8.1",
+        }
+    },
+    {
+        "id": "mobil_lan",
+        "name": "Führungsfahrzeug LAN (10.0.0.x)",
+        "description": "BOS-Einsatznetzwerk im ELW 2 / Abrollbehälter",
+        "settings": {
+            "hw_repeater_ip": "10.0.0.230",
+            "hw_repeater_trap_port": 10162,
+            "hw_usv_ip": "10.0.0.232",
+            "hw_usv_port": 502,
+            "hw_zte_ip": "10.0.0.1",
+            "hw_omada_ip": "10.0.0.1",
+        }
+    }
+]
+
+
 @app.get("/api/settings")
 async def get_settings():
     return {**DEFAULT_SETTINGS, **await db_manager.get_all_settings()}
@@ -856,6 +1267,7 @@ async def get_settings():
 @app.post("/api/settings")
 async def save_settings(data: Dict[str, Any] = Body(...)):
     await db_manager.save_settings_batch(data)
+    await _apply_runtime_settings(data)
     await ws_manager.broadcast({"type": "settings_updated", "settings": data})
     return {"ok": True}
 
@@ -1127,6 +1539,88 @@ async def stop_recorder_probe():
     return {"status": "ok", "message": "Probe-Modus gestoppt"}
 
 
+# ── REST & WebSocket: IP-TX-Transmitter & Web-PTT ────────────────────────────
+
+@app.get("/api/tx/status")
+async def get_tx_status():
+    """Gibt den aktuellen Sendestatus (is_transmitting, slot, target_id, duration_s) zurück."""
+    if not _tx_sender:
+        return {"is_transmitting": False, "status": "disabled"}
+    return _tx_sender.get_status()
+
+
+@app.post("/api/tx/start")
+async def start_tx(data: Dict[str, Any] = Body(default={})):
+    """Startet PTT-Übertragung auf dem Relais."""
+    if not _tx_sender:
+        raise HTTPException(503, "TX-Transmitter ist nicht verfügbar")
+    slot = data.get("slot", "TS1")
+    target_id = int(data.get("target_id", 1))
+    call_type = int(data.get("call_type", 1))
+    success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
+    return {"success": success, "status": _tx_sender.get_status()}
+
+
+@app.post("/api/tx/stop")
+async def stop_tx():
+    """Beendet aktive PTT-Übertragung."""
+    if not _tx_sender:
+        raise HTTPException(503, "TX-Transmitter ist nicht verfügbar")
+    success = await _tx_sender.stop_tx()
+    return {"success": success, "status": _tx_sender.get_status()}
+
+
+@app.websocket("/ws/tx_audio")
+async def websocket_tx_audio(ws: WebSocket):
+    """
+    Dedizierter High-Speed WebSocket für Web-PTT Audio-Streaming vom Smartphone/PC.
+    Empfängt:
+      - JSON-Befehle:
+          {"action": "ptt_press", "slot": "TS1", "target_id": 1, "call_type": 1, "sample_rate": 48000}
+          {"action": "ptt_release"}
+      - Binäre PCM-Audioblöcke (Int16 Mono) während aktiver PTT
+    """
+    await ws.accept()
+    client_in_tx = False
+    in_sample_rate = 48000
+    try:
+        while True:
+            msg = await ws.receive()
+            if "text" in msg and msg["text"]:
+                try:
+                    import json
+                    cmd = json.loads(msg["text"])
+                    action = cmd.get("action")
+                    if action == "ptt_press":
+                        slot = cmd.get("slot", "TS1")
+                        target_id = int(cmd.get("target_id", 1))
+                        call_type = int(cmd.get("call_type", 1))
+                        in_sample_rate = int(cmd.get("sample_rate", 48000))
+                        if _tx_sender:
+                            success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
+                            client_in_tx = success
+                            await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})
+                    elif action == "ptt_release":
+                        if _tx_sender and client_in_tx:
+                            await _tx_sender.stop_tx()
+                            client_in_tx = False
+                            await ws.send_json({"type": "ptt_ack", "action": "release", "success": True})
+                    elif action == "ping":
+                        await ws.send_json({"type": "pong"})
+                except Exception as exc:
+                    logger.debug(f"Web-PTT JSON Fehler: {exc}")
+            elif "bytes" in msg and msg["bytes"]:
+                if _tx_sender and client_in_tx:
+                    _tx_sender.feed_pcm16_audio(msg["bytes"], in_sample_rate=in_sample_rate)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug(f"Web-PTT WebSocket Fehler: {exc}")
+    finally:
+        if client_in_tx and _tx_sender:
+            await _tx_sender.stop_tx()
+
+
 # ── REST: System-Status ──────────────────────────────────────────────────────
 
 @app.get("/api/status")
@@ -1170,12 +1664,78 @@ async def poll_repeater():
     return get_repeater_full_state()
 
 
+@app.get("/api/hardware/repeater/logs")
+async def get_repeater_logs(limit: int = 20):
+    """Liefert die internen Alarm- und Fehlerereignisse direkt aus dem Repeater-NVRAM."""
+    if not _snmp_poller:
+        return {"status": "ok", "count": 0, "logs": []}
+    logs = await _snmp_poller.fetch_recent_logs(max_entries=limit)
+    return {"status": "ok", "count": len(logs), "logs": logs}
+
+
+@app.get("/api/hardware/repeater/network")
+async def get_repeater_network():
+    """Liefert Ethernet-Interface-Telemetrie (Speed, Link-Status, Durchsatz, Errors)."""
+    st = get_repeater_full_state()
+    return {
+        "status": "ok",
+        "speed_mbps":   st.get("eth_speed_mbps", 100),
+        "oper_status":  st.get("eth_oper_status", "Up"),
+        "in_kbps":      st.get("eth_in_kbps", 0.0),
+        "out_kbps":     st.get("eth_out_kbps", 0.0),
+        "in_errors":    st.get("eth_in_errors", 0),
+        "out_errors":   st.get("eth_out_errors", 0),
+    }
+
+
+class RepeaterKnockdownRequest(BaseModel):
+    knockdown: bool = True
+
+
+@app.post("/api/hardware/repeater/knockdown")
+async def repeater_knockdown(req: Optional[RepeaterKnockdownRequest] = None):
+    """
+    Steuert Repeater-Knockdown (Repeating-Sperre / Stummschaltung) via SNMP.
+    knockdown=True: Unterdrückt HF-Aussendungen (sofortige Stummschaltung bei Sabotage/Störern).
+    knockdown=False: Normaler Relaisfunkbetrieb aktiv.
+    """
+    kd = req.knockdown if req is not None else True
+    success = False
+    if _snmp_poller:
+        success = await _snmp_poller.set_repeating_knockdown(kd)
+    else:
+        success = True  # Simuliert ohne Live-Repeater-Hardware
+
+    # Event sofort per WebSocket verteilen
+    await ws_manager.broadcast({
+        "type": "repeater_knockdown_changed",
+        "knockdown": kd,
+        "repeating_state": 1 if kd else 0,
+        "status": "ok" if success else "failed"
+    })
+    return {
+        "status": "ok" if success else "failed",
+        "knockdown": kd,
+        "repeating_state": 1 if kd else 0,
+        "message": "Repeater stummgeschaltet (Knockdown aktiv)" if kd else "Repeater Normalbetrieb wiederhergestellt"
+    }
+
+
 @app.post("/api/hardware/ups/poll")
 async def poll_ups():
     if not _ups_monitor:
         raise HTTPException(503, "USV-Monitor nicht aktiv")
     state = await _ups_monitor.poll_once()
     return state.to_dict()
+
+
+@app.post("/api/hardware/ups/reset_counters")
+async def reset_ups_counters():
+    """Setzt Netzausfall-Zähler und kumulierte kWh für einen neuen Einsatz zurück."""
+    if not _ups_monitor:
+        raise HTTPException(503, "USV-Monitor nicht aktiv")
+    _ups_monitor.reset_counters()
+    return {"status": "ok", "ok": True, "message": "USV-Zähler zurückgesetzt"}
 
 
 @app.get("/api/hardware/ups/scan")
@@ -1230,6 +1790,246 @@ async def clear_packets():
 async def export_ids_json():
     path = await db_manager.export_ids_json()
     return FileResponse(path, filename="ids.json", media_type="application/json")
+
+
+# ── REST: Standort- & Netzwerk-Profile ───────────────────────────────────────
+
+PROFILES_FILE = os.path.join(ROOT_DIR, "network_profiles.json")
+
+DEFAULT_PROFILES = {
+    "koffer": {
+        "id": "koffer",
+        "name": "Einsatzkoffer / ELW",
+        "description": "Standard 192.168.0.x Subnetz (Mobilfunkkoffer)",
+        "settings": {
+            "repeater_ip": "192.168.0.230",
+            "usv_ip": "192.168.0.232",
+            "zte_ip": "192.168.0.1",
+            "omada_ip": "192.168.0.1"
+        }
+    },
+    "wache": {
+        "id": "wache",
+        "name": "Wache / Gerätehaus",
+        "description": "Stationäres Netzwerk 192.168.1.x",
+        "settings": {
+            "repeater_ip": "192.168.1.230",
+            "usv_ip": "192.168.1.232",
+            "zte_ip": "192.168.1.1",
+            "omada_ip": "192.168.1.1"
+        }
+    },
+    "hotspot": {
+        "id": "hotspot",
+        "name": "LTE-Hotspot / Mobilfunk",
+        "description": "Mobiler Router / Smartphone Hotspot 192.168.8.x",
+        "settings": {
+            "repeater_ip": "192.168.8.230",
+            "usv_ip": "192.168.8.232",
+            "zte_ip": "192.168.8.1",
+            "omada_ip": "192.168.8.1"
+        }
+    },
+    "mobil": {
+        "id": "mobil",
+        "name": "Direkt-LAN / Fallback",
+        "description": "Direktverbindung / FRITZ!Box 192.168.178.x",
+        "settings": {
+            "repeater_ip": "192.168.178.230",
+            "usv_ip": "192.168.178.232",
+            "zte_ip": "192.168.178.1",
+            "omada_ip": "192.168.178.1"
+        }
+    }
+}
+
+def _load_network_profiles() -> Dict[str, Any]:
+    if os.path.isfile(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                profiles = dict(DEFAULT_PROFILES)
+                profiles.update(saved.get("profiles", {}))
+                return {
+                    "active_profile": saved.get("active_profile", "koffer"),
+                    "profiles": profiles
+                }
+        except Exception as e:
+            logger.warning("Fehler beim Laden von network_profiles.json: %s", e)
+    return {"active_profile": "koffer", "profiles": dict(DEFAULT_PROFILES)}
+
+def _save_network_profiles(data: Dict[str, Any]):
+    try:
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning("Fehler beim Speichern von network_profiles.json: %s", e)
+
+async def _apply_runtime_settings(new_settings: Dict[str, Any]):
+    global _snmp_poller, _ups_monitor, _zte_monitor, _omada_monitor
+
+    rpt_ip = new_settings.get("repeater_ip") or new_settings.get("hw_repeater_ip")
+    if rpt_ip and _snmp_poller and hasattr(_snmp_poller, "_ip"):
+        _snmp_poller._ip = rpt_ip
+
+    usv_ip = new_settings.get("usv_ip") or new_settings.get("hw_usv_ip")
+    if usv_ip and _ups_monitor and hasattr(_ups_monitor, "_ip"):
+        _ups_monitor._ip = usv_ip
+
+    zte_ip = new_settings.get("zte_ip") or new_settings.get("hw_zte_ip")
+    if zte_ip and _zte_monitor and hasattr(_zte_monitor, "_ip"):
+        _zte_monitor._ip = zte_ip
+
+    omada_ip = new_settings.get("omada_ip") or new_settings.get("hw_omada_ip")
+    if omada_ip and _omada_monitor and hasattr(_omada_monitor, "_ip"):
+        _omada_monitor._ip = omada_ip
+
+    for k, v in new_settings.items():
+        db_key = f"hw_{k}" if not k.startswith("hw_") else k
+        await db_manager.save_setting(db_key, v)
+
+
+@app.get("/api/system/profiles")
+async def get_profiles():
+    return _load_network_profiles()
+
+
+@app.post("/api/system/profiles/apply")
+async def apply_profile(data: Dict[str, Any] = Body(...)):
+    profile_id = data.get("profile_id")
+    prof_data = _load_network_profiles()
+    profiles = prof_data["profiles"]
+    if profile_id not in profiles:
+        raise HTTPException(404, f"Profil '{profile_id}' nicht gefunden")
+
+    target_prof = profiles[profile_id]
+    settings = target_prof.get("settings", {})
+    await _apply_runtime_settings(settings)
+
+    prof_data["active_profile"] = profile_id
+    _save_network_profiles(prof_data)
+
+    await ws_manager.broadcast({
+        "type": "profile_changed",
+        "profile_id": profile_id,
+        "name": target_prof.get("name"),
+        "settings": settings
+    })
+    return {
+        "status": "ok",
+        "applied_profile": profile_id,
+        "name": target_prof.get("name"),
+        "settings": settings
+    }
+
+
+@app.post("/api/system/profiles/save")
+async def save_profile(data: Dict[str, Any] = Body(...)):
+    profile_id = data.get("id") or str(int(time.time()))
+    name = data.get("name") or "Neues Profil"
+    settings = data.get("settings", {})
+    description = data.get("description", "")
+
+    prof_data = _load_network_profiles()
+    prof_data["profiles"][profile_id] = {
+        "id": profile_id,
+        "name": name,
+        "description": description,
+        "settings": settings
+    }
+    _save_network_profiles(prof_data)
+    return {"status": "ok", "profile_id": profile_id, "profile": prof_data["profiles"][profile_id]}
+
+
+@app.delete("/api/system/profiles/{profile_id}")
+async def delete_profile(profile_id: str):
+    if profile_id in DEFAULT_PROFILES:
+        raise HTTPException(400, "Standard-Profile können nicht gelöscht werden")
+    prof_data = _load_network_profiles()
+    if profile_id in prof_data["profiles"]:
+        del prof_data["profiles"][profile_id]
+        if prof_data["active_profile"] == profile_id:
+            prof_data["active_profile"] = "koffer"
+        _save_network_profiles(prof_data)
+        return {"status": "ok", "deleted": profile_id}
+    raise HTTPException(404, "Profil nicht gefunden")
+
+
+# ── REST: Netzwerk-Interfaces & QR Connect ───────────────────────────────────
+
+@app.get("/api/system/network_interfaces")
+async def get_network_interfaces():
+    primary_ip, subnet_prefix = get_local_ip_and_subnet()
+    interfaces = [
+        {"name": "Primäre Schnittstelle (LAN/WLAN)", "ip": primary_ip, "is_recommended": True}
+    ]
+    if primary_ip != "127.0.0.1":
+        interfaces.append({"name": "Localhost (Loopback)", "ip": "127.0.0.1", "is_recommended": False})
+
+    return {
+        "status": "ok",
+        "primary_ip": primary_ip,
+        "recommended_ip": primary_ip,
+        "subnet_prefix": subnet_prefix,
+        "interfaces": interfaces,
+        "port": 8000
+    }
+
+
+@app.get("/api/system/qr_connect")
+async def get_qr_connect(ip: Optional[str] = None):
+    target_ip = ip or get_local_ip_and_subnet()[0]
+    url = f"http://{target_ip}:8000/"
+    svg = generate_qr_svg(url, size=240)
+    return Response(svg, media_type="image/svg+xml")
+
+
+# ── REST: Subnetz-Autodiscovery ──────────────────────────────────────────────
+
+@app.post("/api/hardware/scan_subnet")
+async def api_scan_subnet(data: Dict[str, Any] = Body(default={})):
+    subnet_prefix = data.get("subnet_prefix")
+    devices, scan_time = await SubnetScanner.scan_subnet(subnet_prefix=subnet_prefix)
+    dev_dicts = [d.to_dict() if hasattr(d, "to_dict") else d for d in devices]
+    prefix_str = (subnet_prefix.strip() if subnet_prefix else "192.168.0")
+    if not prefix_str.endswith("."):
+        prefix_str += "."
+    return {
+        "status": "ok",
+        "count": len(dev_dicts),
+        "results": dev_dicts,
+        "devices": dev_dicts,
+        "scan_time_seconds": scan_time,
+        "subnet_scanned": f"{prefix_str}0/24"
+    }
+
+
+# ── REST: Offline-Karten Pre-Caching ──────────────────────────────────────────
+
+@app.get("/api/map/cache_status")
+async def get_map_cache_status():
+    stats = get_cache_stats()
+    return {
+        "status": "ok",
+        "tile_count": stats.get("tile_count", 0),
+        "total_tiles_cached": stats.get("tile_count", 0),
+        "size_mb": stats.get("size_mb", 0.0),
+        "total_size_mb": stats.get("size_mb", 0.0),
+        "cache_dir": stats.get("cache_dir", TILES_DIR),
+    }
+
+
+@app.post("/api/map/cache_area")
+async def post_cache_area(data: Dict[str, Any] = Body(...)):
+    lat = float(data.get("lat", 52.5200))
+    lon = float(data.get("lon", 13.4050))
+    radius_km = float(data.get("radius_km", 3.0))
+    min_zoom = int(data.get("min_zoom", 12))
+    max_zoom = int(data.get("max_zoom", 16))
+
+    result = await TileCacheManager.cache_area_by_radius(lat, lon, radius_km, min_zoom, max_zoom)
+    return result
+
 
 
 # ── Karten-Proxy (Offline-Tiles) ─────────────────────────────────────────────

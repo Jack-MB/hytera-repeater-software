@@ -52,7 +52,7 @@ REG_A_BYPASS_FREQ   = 8    # Bypass-Frequenz      /10 → Hz
 REG_A_OUTPUT_VOLT   = 10   # Ausgangsspannung     /10 → V
 REG_A_OUTPUT_FREQ   = 15   # Ausgangsfrequenz     /10 → Hz
 REG_A_OUTPUT_CURR   = 12   # Ausgangsstrom        /10 → A
-REG_A_OUTPUT_POWER  = 13   # Ausgangsleistung     W (direkt)
+REG_A_OUTPUT_POWER_VA= 13  # Scheinleistung       VA (direkt)
 REG_A_OUTPUT_POWER_W= 14   # Wirkleistung         W
 REG_A_BATT_PCT      = 40   # Batterieladestand    % (0–100)
 REG_A_BATT_RUNTIME  = 41   # Restlaufzeit Batterie Minuten
@@ -72,6 +72,8 @@ REG_B_BATT_LOW      = 12   # Batterie schwach     1 = ja
 REG_B_FAULT         = 13   # Fehlercode aktiv     1 = ja
 REG_B_TYPE          = 15   # UPS-Typ-Code
 REG_B_FAULT_CODE    = 16   # Fehlercode
+REG_B_OUTLET_1      = 18   # Steckdosen-Segment 1 1 = Ein, 0 = Aus
+REG_B_OUTLET_2      = 19   # Steckdosen-Segment 2 1 = Ein, 0 = Aus
 
 # Ungültig/nicht unterstützt Sentinel
 _INVALID = 65535
@@ -96,7 +98,15 @@ class UPSState:
     output_volt:        Optional[float] = None  # V
     output_freq:        Optional[float] = None  # Hz
     output_curr:        Optional[float] = None  # A
-    output_power_w:     Optional[float] = None  # W
+    output_power_w:     Optional[float] = None  # Wirkleistung W
+    output_power_va:    Optional[float] = None  # Scheinleistung VA
+    power_factor:       Optional[float] = None  # cos phi (0.00 - 1.00)
+
+    # Energie & Netzausfall-Zähler
+    energy_kwh:         float = 0.0             # Kumulierter Verbrauch (kWh)
+    transfers_to_battery: int = 0               # Anzahl Netzausfälle
+    total_battery_seconds: float = 0.0          # Sekunden im Akkubetrieb
+    last_power_fail_time: Optional[float] = None# Zeitstempel letzter Netzausfall
 
     # Batterie
     batt_pct:           Optional[int]   = None  # %
@@ -105,17 +115,20 @@ class UPSState:
     batt_curr_a:        Optional[float] = None  # A (neg = Entladen)
     batt_temp_c:        Optional[float] = None  # °C
     batt_status:        str = "Unbekannt"
+    battery_soh_pct:    int = 100               # State of Health (%)
 
     # Last & Temperatur
     load_pct:           Optional[int]   = None  # %
     internal_temp_c:    Optional[int]   = None  # °C
 
-    # Status-Flags
+    # Status-Flags & Segmente
     netz_ok:            bool = False
     bypass_active:      bool = False
     batt_low:           bool = False
     fault_active:       bool = False
     fault_code:         Optional[int] = None
+    outlet_group_1:     bool = True             # Segment 1 Aktiv
+    outlet_group_2:     bool = True             # Segment 2 Aktiv
 
     # Abgeleiteter Status
     netz_status:        str = "Unbekannt"
@@ -217,8 +230,14 @@ def _parse_registers(
         state.output_freq  = round(raw_out_freq / 10.0, 1) if raw_out_freq is not None else None
         raw_out_curr = _safe_val(block_a, REG_A_OUTPUT_CURR)
         state.output_curr  = round(raw_out_curr / 10.0, 1) if raw_out_curr is not None else None
+        raw_out_va = _safe_val(block_a, REG_A_OUTPUT_POWER_VA)
+        state.output_power_va = int(raw_out_va) if raw_out_va is not None else None
         raw_out_pwr = _safe_val(block_a, REG_A_OUTPUT_POWER_W)
         state.output_power_w = int(raw_out_pwr) if raw_out_pwr is not None else None
+        if state.output_power_va and state.output_power_va > 0 and state.output_power_w is not None:
+            state.power_factor = round(min(1.0, max(0.0, state.output_power_w / state.output_power_va)), 2)
+        elif state.output_power_w is not None:
+            state.power_factor = 1.0
 
         # ── Batterie ──────────────────────────────────────────────
         raw_batt_pct = _safe_val(block_a, REG_A_BATT_PCT)
@@ -262,6 +281,14 @@ def _parse_registers(
             fault_code = _safe_val(block_b, REG_B_FAULT_CODE)
             state.fault_code = int(fault_code) if fault_code is not None else None
 
+            raw_out1 = _safe_val(block_b, REG_B_OUTLET_1)
+            if raw_out1 is not None:
+                state.outlet_group_1 = (raw_out1 != 0)
+
+            raw_out2 = _safe_val(block_b, REG_B_OUTLET_2)
+            if raw_out2 is not None:
+                state.outlet_group_2 = (raw_out2 != 0)
+
         # ── Abgeleitete Statuswerte ───────────────────────────────
         state.netz_status = (
             "Normal" if state.netz_ok and not state.bypass_active
@@ -271,6 +298,14 @@ def _parse_registers(
         )
 
         state.batt_status = classify_battery(state.batt_pct, state.netz_ok)
+
+        # SOH-Abschätzung
+        soh = 100
+        if state.fault_active:
+            soh = max(50, soh - 30)
+        if state.batt_low and (state.load_pct is not None and state.load_pct < 40):
+            soh = min(soh, 65)
+        state.battery_soh_pct = soh
 
         # ── Rohdaten ──────────────────────────────────────────────
         state.raw_block_a = list(block_a) if block_a else None
@@ -312,6 +347,21 @@ class UPSMonitor:
         self._last_state:  Optional[UPSState] = None
         self._loop         = None
         self._offline_logged = False
+
+        # Zähler & Akkumulatoren
+        self._energy_kwh: float = 0.0
+        self._transfers_to_battery: int = 0
+        self._total_battery_seconds: float = 0.0
+        self._last_power_fail_time: Optional[float] = None
+        self._last_poll_time: Optional[float] = None
+        self._last_netz_ok: Optional[bool] = None
+
+    def reset_counters(self) -> None:
+        """Setzt Zähler (Energieverbrauch kWh und Netzausfälle) für einen neuen Einsatz zurück."""
+        self._energy_kwh = 0.0
+        self._transfers_to_battery = 0
+        self._total_battery_seconds = 0.0
+        self._last_power_fail_time = None
 
     async def start(self) -> None:
         """Startet den Polling-Loop."""
@@ -421,7 +471,35 @@ class UPSMonitor:
         finally:
             client.close()
 
-        return _parse_registers(block_a, block_b)
+        state = _parse_registers(block_a, block_b)
+
+        # Akkumulatoren & Netzausfall-Zähler berechnen
+        now = time.time()
+        if self._last_poll_time and state.output_power_w is not None and state.online:
+            dt = now - self._last_poll_time
+            if 0 < dt < 300:
+                self._energy_kwh += (state.output_power_w * dt) / 3_600_000.0
+
+        if state.online:
+            if self._last_netz_ok is True and state.netz_ok is False:
+                self._transfers_to_battery += 1
+                self._last_power_fail_time = now
+
+            if state.netz_ok is False and self._last_poll_time:
+                dt = now - self._last_poll_time
+                if 0 < dt < 300:
+                    self._total_battery_seconds += dt
+
+            self._last_netz_ok = state.netz_ok
+
+        self._last_poll_time = now
+
+        state.energy_kwh = round(self._energy_kwh, 4)
+        state.transfers_to_battery = self._transfers_to_battery
+        state.total_battery_seconds = round(self._total_battery_seconds, 1)
+        state.last_power_fail_time = self._last_power_fail_time
+
+        return state
 
     async def scan_all_registers(self) -> Dict[str, Any]:
         """
