@@ -1,6 +1,6 @@
 # Hytera Command Center (ELW / Leitstellen-System)
 
-Echtzeit-Leitstellen-, Disponenten- und Einsatzführungssystem für **Hytera DMR-Repeater (HR1065 / RD985)** über das Hytera ADK / NAI (Network Application Interface).
+Echtzeit-Leitstellen-, Disponenten- und Einsatzführungssystem für **Hytera DMR-Repeater (HR1065 / HR655 / RD985)** über das Hytera ADK / NAI (Network Application Interface).
 
 Entwickelt für den autarken Offline-Betrieb auf Einsatzleitwagen (ELW), Funkzentralen und mobilen Führungsstellen ohne zwingende externe Internetverbindung.
 

@@ -2,7 +2,7 @@
 ## Reverse-Engineered Deep-Technical Protocol Reference
 
 > **Dokumentenversion:** 2.4.0 (Stand: September 2026)  
-> **Ziel-Hardware:** Hytera HR1065 / RD985 DMR Tier II / Tier III Repeater  
+> **Ziel-Hardware:** Hytera HR1065 / HR655 (H-Serie) & RD985 DMR Tier II / Tier III Repeater  
 > **Schnittstelle:** Ethernet Network Application Interface (NAI) via UDP / IP  
 > **Status:** Vollständig reverse-engineered, implementiert und mit 127/127 Unittests verifiziert.
 

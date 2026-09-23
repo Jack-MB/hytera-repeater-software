@@ -1,6 +1,6 @@
 # Hytera Repeater Software – Einsatz- & Leitstellensystem
 
-Dieses Repository umfasst die vollständige, militärisch und BOS-erprobte Software-Suite zur Anbindung, Überwachung, Einsatzführung und Protokollierung des DMR-Repeaters **Hytera HR1065** (sowie **RD985**) und aller angeschlossenen Funkstellen, Leitstellen-Arbeitsplätze und Infrastrukturkomponenten.
+Dieses Repository umfasst die vollständige, militärisch und BOS-erprobte Software-Suite zur Anbindung, Überwachung, Einsatzführung und Protokollierung der Hytera DMR-Repeater **HR1065**, **HR655** (kompakte H-Serie) sowie **RD985** (Legacy-Serie) und aller angeschlossenen Funkstellen, Leitstellen-Arbeitsplätze und Infrastrukturkomponenten.
 
 Das System enthält eine vollständige, reverse-engineered Protokoll-Implementierung des Hytera Network Application Interface (NAI) über UDP/IP – einschließlich Call-Control, RRS-Registrierung, GPS-LIP-Ortung, DMR-SMS, bidirektionaler Sprachübertragung (RTP G.711 µ-law), Remote-PTT, Busy Channel Lockout (BCL) und Notfall-Sperrung (OTA Stun / Repeater Knockdown).
 
