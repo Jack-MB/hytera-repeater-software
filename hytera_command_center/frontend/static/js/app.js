@@ -3363,6 +3363,27 @@ async function initPttAudio(deviceId = null) {
     try { pttMediaStream.getTracks().forEach(t => t.stop()); } catch(e) {}
     pttMediaStream = null;
   }
+  // Prüfen, ob der Browser Mikrofonzugriff im aktuellen Kontext erlaubt
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    if (!isLocal && window.location.protocol === "http:") {
+      showToast(
+        "⚠️ Browser blockiert Mikrofon über LAN-IP",
+        "Aufgrund der Browser-Sicherheitsrichtlinie muss die Seite auf diesem PC über 'http://localhost:8000' aufgerufen werden (oder via HTTPS).",
+        "emergency",
+        10000
+      );
+    } else {
+      showToast(
+        "⚠️ Mikrofon im Browser nicht erlaubt",
+        "Bitte klicken Sie links neben der Webadresse (URL) auf das Schloss/Einstellungs-Icon und stellen Sie 'Mikrofon' auf 'Zulassen'.",
+        "warning",
+        8000
+      );
+    }
+    return false;
+  }
+
   try {
     const audioConstraints = {
       echoCancellation: true,
@@ -3411,11 +3432,23 @@ async function initPttAudio(deviceId = null) {
     };
 
     connectPttAudioWs();
-    showToast("✓ Mikrofon bereit für PTT", "info");
+    populateAudioInputDevices();
+    showToast("✓ Mikrofon bereit für PTT", "good", 3000);
     return true;
   } catch (err) {
     console.error("Mikrofon-Zugriff verweigert:", err);
-    showToast("Mikrofon-Zugriff verweigert oder nicht vorhanden.", "warning");
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      showToast(
+        "⚠️ Mikrofon-Berechtigung verweigert",
+        "Klicken Sie links neben der Webadresse (URL) auf das Schloss-/Website-Einstellungs-Symbol und wählen Sie bei Mikrofon 'Zulassen'.",
+        "emergency",
+        10000
+      );
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      showToast("Kein Mikrofon gefunden", "Es wurde kein aktives Mikrofon an diesem Computer erkannt.", "warning");
+    } else {
+      showToast("Mikrofon-Fehler", String(err.message || err), "warning");
+    }
     return false;
   }
 }
