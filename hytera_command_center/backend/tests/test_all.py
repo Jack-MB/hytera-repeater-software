@@ -2405,6 +2405,163 @@ class TestGeofenceTacticalSystem:
             assert (test_radio_id, gf_id) not in _radio_zone_states
 
 
+# ── Tests: Busy Channel Lockout (BCL) & Vorrang-Übersteuerung ────────────────
+
+class TestBusyChannelLockoutAndPriority:
+    """Prüft die BCL-Kanalbelegungsüberwachung, Sperre und Vorrang-Übersteuerung."""
+
+    @pytest.mark.asyncio
+    async def test_channel_busy_state_tracking(self):
+        from backend.main import _channel_busy_state, _get_clean_channel_busy, _broadcast_event
+        # Ausgangszustand zurücksetzen
+        _channel_busy_state["TS1"]["busy"] = False
+        _channel_busy_state["TS2"]["busy"] = False
+
+        # 1. Funkgerät beginnt zu sprechen auf TS1
+        await _broadcast_event({
+            "type": "ptt_start",
+            "radio_id": 4001,
+            "slot": "TS1",
+            "call_type": "Gruppe",
+            "target_id": 1,
+        })
+
+        busy_st = _get_clean_channel_busy()
+        assert busy_st["TS1"]["busy"] is True
+        assert busy_st["TS1"]["radio_id"] == 4001
+        assert busy_st["TS2"]["busy"] is False
+
+        # 2. Funkgerät beendet Funkspruch
+        await _broadcast_event({
+            "type": "ptt_end",
+            "radio_id": 4001,
+            "slot": "TS1",
+            "call_type": "Gruppe",
+            "duration_ms": 2500,
+        })
+
+        busy_st2 = _get_clean_channel_busy()
+        assert busy_st2["TS1"]["busy"] is False
+        assert busy_st2["TS1"]["radio_id"] is None
+
+    def test_channel_busy_rest_endpoint(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        with TestClient(app) as client:
+            res = client.get("/api/tx/channel_busy")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "ok"
+            assert "channel_busy" in data
+            assert "TS1" in data["channel_busy"]
+            assert "TS2" in data["channel_busy"]
+
+    def test_bcl_rejects_tx_start_when_channel_is_busy(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app, _channel_busy_state
+        with TestClient(app) as client:
+            # TS1 künstlich belegen
+            _channel_busy_state["TS1"]["busy"] = True
+            _channel_busy_state["TS1"]["radio_id"] = 7788
+            _channel_busy_state["TS1"]["start_time"] = time.time()
+
+            try:
+                # Versuch ohne Vorrang auf TS1 zu senden -> muss verweigert werden
+                res = client.post("/api/tx/start", json={"slot": "TS1", "priority_override": False})
+                assert res.status_code == 200
+                data = res.json()
+                assert data["success"] is False
+                assert data["reason"] == "channel_busy"
+                assert "7788" in data["message"]
+            finally:
+                _channel_busy_state["TS1"]["busy"] = False
+
+    def test_bcl_allows_tx_start_with_priority_override(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app, _channel_busy_state
+        with TestClient(app) as client:
+            # TS1 belegen
+            _channel_busy_state["TS1"]["busy"] = True
+            _channel_busy_state["TS1"]["radio_id"] = 7788
+            _channel_busy_state["TS1"]["start_time"] = time.time()
+
+            try:
+                # Senden MIT Vorrang-Übersteuerung (priority_override: True) -> muss durchgehen
+                res = client.post("/api/tx/start", json={"slot": "TS1", "priority_override": True})
+                assert res.status_code == 200
+                data = res.json()
+                assert data["success"] is True
+
+                # Beenden
+                stop_res = client.post("/api/tx/stop")
+                assert stop_res.status_code == 200
+                assert stop_res.json()["success"] is True
+            finally:
+                _channel_busy_state["TS1"]["busy"] = False
+
+    def test_bcl_allows_all_call_even_when_busy(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app, _channel_busy_state
+        with TestClient(app) as client:
+            # TS1 belegen
+            _channel_busy_state["TS1"]["busy"] = True
+            _channel_busy_state["TS1"]["radio_id"] = 7788
+            _channel_busy_state["TS1"]["start_time"] = time.time()
+
+            try:
+                # All-Call (call_type = 2) ist ein Notruf-Rundruf und darf BCL immer übersteuern
+                res = client.post("/api/tx/start", json={"slot": "TS1", "call_type": 2, "priority_override": False})
+                assert res.status_code == 200
+                data = res.json()
+                assert data["success"] is True
+
+                client.post("/api/tx/stop")
+            finally:
+                _channel_busy_state["TS1"]["busy"] = False
+
+    def test_websocket_bcl_rejection_and_override(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app, _channel_busy_state
+        with TestClient(app) as client:
+            _channel_busy_state["TS1"]["busy"] = True
+            _channel_busy_state["TS1"]["radio_id"] = 9999
+            _channel_busy_state["TS1"]["start_time"] = time.time()
+
+            try:
+                with client.websocket_connect("/ws/tx_audio") as ws:
+                    # 1. PTT ohne Vorrang versuchen -> Ablehnung
+                    ws.send_json({
+                        "action": "ptt_press",
+                        "slot": "TS1",
+                        "priority_override": False,
+                    })
+                    ack = ws.receive_json()
+                    assert ack["type"] == "ptt_ack"
+                    assert ack["action"] == "press"
+                    assert ack["success"] is False
+                    assert ack["reason"] == "channel_busy"
+
+                    # 2. PTT mit Vorrang versuchen -> Erfolg
+                    ws.send_json({
+                        "action": "ptt_press",
+                        "slot": "TS1",
+                        "priority_override": True,
+                    })
+                    ack2 = ws.receive_json()
+                    assert ack2["type"] == "ptt_ack"
+                    assert ack2["action"] == "press"
+                    assert ack2["success"] is True
+
+                    # 3. PTT loslassen
+                    ws.send_json({"action": "ptt_release"})
+                    ack3 = ws.receive_json()
+                    assert ack3["type"] == "ptt_ack"
+                    assert ack3["action"] == "release"
+                    assert ack3["success"] is True
+            finally:
+                _channel_busy_state["TS1"]["busy"] = False
+
+
 
 
 

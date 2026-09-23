@@ -142,6 +142,27 @@ _omada_monitor: Optional[OmadaER606Monitor] = None
 _audio_recorder: Optional[AudioRecorder]   = None
 _tx_sender:      Optional[HyteraTxSender]   = None
 
+# Kanalbelegungs-Status pro Zeitschlitz (Busy Channel Lockout / BCL)
+_channel_busy_state: Dict[str, Dict[str, Any]] = {
+    "TS1": {"busy": False, "radio_id": None, "call_type": None, "target_id": None, "start_time": None},
+    "TS2": {"busy": False, "radio_id": None, "call_type": None, "target_id": None, "start_time": None},
+}
+
+
+def _get_clean_channel_busy() -> Dict[str, Dict[str, Any]]:
+    """Gibt den aktuellen Belegungsstatus zurück und bereinigt veraltete Sperren automatisch."""
+    now = time.time()
+    for s, info in _channel_busy_state.items():
+        if info.get("busy") and info.get("start_time"):
+            if now - info["start_time"] > 35.0:
+                logger.debug(f"Kanalbelegung für {s} nach 35s Inaktivität automatisch freigegeben.")
+                info["busy"] = False
+                info["radio_id"] = None
+                info["call_type"] = None
+                info["target_id"] = None
+                info["start_time"] = None
+    return {k: dict(v) for k, v in _channel_busy_state.items()}
+
 
 def get_repeater_full_state() -> Dict[str, Any]:
     """
@@ -352,12 +373,34 @@ async def _broadcast_event(event: Dict[str, Any]) -> None:
                 logger.debug(f"Fehler bei Zonenprüfung: {gf_exc}")
         await ws_manager.broadcast(event)
 
-    # PTT-Start → WebSocket
+    # PTT-Start → WebSocket & Busy Channel Lockout (BCL)
     elif ev_type == "ptt_start":
+        raw_slot = event.get("slot", "TS1")
+        slot = f"TS{raw_slot}" if isinstance(raw_slot, int) else str(raw_slot or "TS1").upper()
+        if slot in _channel_busy_state:
+            _channel_busy_state[slot] = {
+                "busy": True,
+                "radio_id": event.get("radio_id"),
+                "call_type": event.get("call_type", "Gruppe"),
+                "target_id": event.get("target_id", 1),
+                "start_time": time.time(),
+            }
+        event["channel_busy"] = _get_clean_channel_busy()
         await ws_manager.broadcast(event)
 
-    # PTT-Ende → Datenbank + WebSocket + mission_id zuweisen
+    # PTT-Ende → Datenbank + WebSocket + BCL freigeben
     elif ev_type == "ptt_end":
+        raw_slot = event.get("slot", "TS1")
+        slot = f"TS{raw_slot}" if isinstance(raw_slot, int) else str(raw_slot or "TS1").upper()
+        if slot in _channel_busy_state:
+            _channel_busy_state[slot] = {
+                "busy": False,
+                "radio_id": None,
+                "call_type": None,
+                "target_id": None,
+                "start_time": None,
+            }
+        event["channel_busy"] = _get_clean_channel_busy()
         radio_id    = event.get("radio_id")
         duration_ms = event.get("duration_ms", 0)
         if radio_id and duration_ms > 0:
@@ -722,7 +765,8 @@ async def websocket_endpoint(ws: WebSocket):
                             "calls": calls, "markers": markers,
                             "geofences": geofences,
                             "settings": settings, "mission": mission,
-                            "snmp_events": snmp_evs})
+                            "snmp_events": snmp_evs,
+                            "channel_busy": _get_clean_channel_busy()})
 
         # Aktueller Hardware-Status – sicher abfragen
         try:
@@ -745,12 +789,16 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception as e:
             logger.debug(f"WS Init Repeater: {e}")
 
-        # Aktueller TX-Sendestatus
+        # Aktueller TX-Sendestatus & Kanalbelegung
         if _tx_sender:
             try:
                 await ws.send_json({"type": "tx_state_changed", **_tx_sender.get_status()})
             except Exception as e:
                 logger.debug(f"WS Init TX: {e}")
+        try:
+            await ws.send_json({"type": "channel_busy_update", "channel_busy": _get_clean_channel_busy()})
+        except Exception as e:
+            logger.debug(f"WS Init Channel Busy: {e}")
 
         # Verbindung offenhalten
         while True:
@@ -765,11 +813,30 @@ async def websocket_endpoint(ws: WebSocket):
                         cmd = json.loads(msg)
                         action = cmd.get("action")
                         if action == "ptt_press" and _tx_sender:
-                            slot = cmd.get("slot", "TS1")
+                            raw_slot = cmd.get("slot", "TS1")
+                            slot = f"TS{raw_slot}" if isinstance(raw_slot, int) else str(raw_slot or "TS1").upper()
                             target_id = int(cmd.get("target_id", 1))
                             call_type = int(cmd.get("call_type", 1))
-                            success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
-                            await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})
+                            priority_override = bool(cmd.get("priority_override", False))
+
+                            slot_info = _get_clean_channel_busy().get(slot, {})
+                            if slot_info.get("busy") and not priority_override and call_type != 2:
+                                caller_id = slot_info.get("radio_id")
+                                logger.info(f"WS PTT verweigert: Kanal {slot} belegt durch Radio {caller_id} (BCL)")
+                                await ws.send_json({
+                                    "type": "ptt_ack",
+                                    "action": "press",
+                                    "success": False,
+                                    "reason": "channel_busy",
+                                    "slot": slot,
+                                    "radio_id": caller_id,
+                                    "message": f"Kanal {slot} ist durch Funkgerät {caller_id} belegt",
+                                })
+                            else:
+                                if slot_info.get("busy") and priority_override:
+                                    logger.info(f"WS PTT Vorrang-Übersteuerung auf Slot {slot} durch Leitstelle!")
+                                success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
+                                await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})
                         elif action == "ptt_release" and _tx_sender:
                             await _tx_sender.stop_tx()
                             await ws.send_json({"type": "ptt_ack", "action": "release", "success": True})
@@ -1551,14 +1618,39 @@ async def get_tx_status():
     return _tx_sender.get_status()
 
 
+@app.get("/api/tx/channel_busy")
+async def get_channel_busy():
+    """Gibt den aktuellen Belegungsstatus der Zeitschlitze zurück (Busy Channel Lockout)."""
+    return {"status": "ok", "channel_busy": _get_clean_channel_busy()}
+
+
 @app.post("/api/tx/start")
 async def start_tx(data: Dict[str, Any] = Body(default={})):
-    """Startet PTT-Übertragung auf dem Relais."""
+    """Startet PTT-Übertragung auf dem Relais mit BCL-Prüfung und Vorrang-Option."""
     if not _tx_sender:
         raise HTTPException(503, "TX-Transmitter ist nicht verfügbar")
-    slot = data.get("slot", "TS1")
+    raw_slot = data.get("slot", "TS1")
+    slot = f"TS{raw_slot}" if isinstance(raw_slot, int) else str(raw_slot or "TS1").upper()
     target_id = int(data.get("target_id", 1))
     call_type = int(data.get("call_type", 1))
+    priority_override = bool(data.get("priority_override", False))
+
+    slot_info = _get_clean_channel_busy().get(slot, {})
+    if slot_info.get("busy") and not priority_override and call_type != 2:
+        caller_id = slot_info.get("radio_id")
+        logger.info(f"TX verweigert: Kanal {slot} ist belegt durch Funkgerät {caller_id} (BCL aktiv)")
+        return {
+            "success": False,
+            "reason": "channel_busy",
+            "message": f"Kanal {slot} ist aktuell durch Funkgerät {caller_id} belegt.",
+            "slot": slot,
+            "radio_id": caller_id,
+            "status": _tx_sender.get_status(),
+        }
+
+    if slot_info.get("busy") and priority_override:
+        logger.info(f"TX Vorrang-Übersteuerung auf Slot {slot} durch Leitstelle (Funker {slot_info.get('radio_id')} überstimmt)!")
+
     success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
     return {"success": success, "status": _tx_sender.get_status()}
 
@@ -1578,7 +1670,7 @@ async def websocket_tx_audio(ws: WebSocket):
     Dedizierter High-Speed WebSocket für Web-PTT Audio-Streaming vom Smartphone/PC.
     Empfängt:
       - JSON-Befehle:
-          {"action": "ptt_press", "slot": "TS1", "target_id": 1, "call_type": 1, "sample_rate": 48000}
+          {"action": "ptt_press", "slot": "TS1", "target_id": 1, "call_type": 1, "sample_rate": 48000, "priority_override": false}
           {"action": "ptt_release"}
       - Binäre PCM-Audioblöcke (Int16 Mono) während aktiver PTT
     """
@@ -1594,11 +1686,31 @@ async def websocket_tx_audio(ws: WebSocket):
                     cmd = json.loads(msg["text"])
                     action = cmd.get("action")
                     if action == "ptt_press":
-                        slot = cmd.get("slot", "TS1")
+                        raw_slot = cmd.get("slot", "TS1")
+                        slot = f"TS{raw_slot}" if isinstance(raw_slot, int) else str(raw_slot or "TS1").upper()
                         target_id = int(cmd.get("target_id", 1))
                         call_type = int(cmd.get("call_type", 1))
+                        priority_override = bool(cmd.get("priority_override", False))
                         in_sample_rate = int(cmd.get("sample_rate", 48000))
+
+                        slot_info = _get_clean_channel_busy().get(slot, {})
+                        if slot_info.get("busy") and not priority_override and call_type != 2:
+                            caller_id = slot_info.get("radio_id")
+                            logger.info(f"Web-PTT verweigert: Kanal {slot} belegt durch Radio {caller_id} (BCL)")
+                            await ws.send_json({
+                                "type": "ptt_ack",
+                                "action": "press",
+                                "success": False,
+                                "reason": "channel_busy",
+                                "slot": slot,
+                                "radio_id": caller_id,
+                                "message": f"Kanal {slot} belegt durch Radio {caller_id}",
+                            })
+                            continue
+
                         if _tx_sender:
+                            if slot_info.get("busy") and priority_override:
+                                logger.info(f"Web-PTT Vorrang-Übersteuerung auf Slot {slot} durch Leitstelle!")
                             success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
                             client_in_tx = True
                             await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})

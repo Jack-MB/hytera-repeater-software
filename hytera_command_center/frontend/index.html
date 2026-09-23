@@ -1157,12 +1157,13 @@
 
 <!-- ════ WEB-PTT DISPATCHER TRANSMITTER BAR ════ -->
 <div id="web-ptt-bar" class="ptt-bar">
-  <div class="ptt-bar-slot-group">
+  <div class="ptt-bar-slot-group" style="display:flex;align-items:center;gap:6px;">
     <label class="ptt-label" for="ptt-slot-select">Kanal:</label>
-    <select id="ptt-slot-select" class="form-select form-select-sm" style="width:75px;padding:3px 6px;font-size:12px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);">
+    <select id="ptt-slot-select" class="form-select form-select-sm" onchange="onPttSlotSelectChange()" style="width:75px;padding:3px 6px;font-size:12px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);">
       <option value="TS1" selected>TS 1</option>
       <option value="TS2">TS 2</option>
     </select>
+    <span id="ptt-channel-status-badge" class="ptt-channel-badge badge-free" title="Kanalbelegung auf gewähltem Zeitschlitz">● TS1 FREI</span>
   </div>
   
   <div class="ptt-bar-tg-group">
@@ -1194,10 +1195,13 @@
     <div class="ptt-tx-timer" id="ptt-tx-timer">00:00</div>
   </div>
 
-  <div class="ptt-bar-toggle" style="display:flex;align-items:center;gap:6px;">
-    <select id="ptt-audio-device-select" class="form-select form-select-sm" style="max-width:120px;padding:2px 4px;font-size:11px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);" title="Mikrofon-Eingabegerät">
+  <div class="ptt-bar-toggle" style="display:flex;align-items:center;gap:8px;">
+    <select id="ptt-audio-device-select" class="form-select form-select-sm" style="max-width:115px;padding:2px 4px;font-size:11px;background:var(--bg-input);color:var(--text-primary);border-color:var(--border-normal);" title="Mikrofon-Eingabegerät">
       <option value="">Standard-Mic</option>
     </select>
+    <label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--text-secondary);cursor:pointer;" title="Vorrang-Durchsage (Preemption): Ermöglicht das Senden auch bei belegtem Kanal">
+      <input type="checkbox" id="ptt-priority-override" onchange="updateChannelBusyUI()" style="width:12px;height:12px;"> Vorrang
+    </label>
     <label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--text-secondary);cursor:pointer;" title="Akustischer Ton beim PTT-Start und Roger-Beep beim Loslassen">
       <input type="checkbox" id="ptt-roger-beep" checked style="width:12px;height:12px;"> Roger
     </label>

@@ -22,6 +22,7 @@ const STATE = {
   radios:        {},   // radio_id → radio object
   gpsPositions:  {},   // radio_id → {lat, lon, heading, rssi}
   activePTTs:    {},   // radio_id → {slot, call_type}
+  channelBusy:   { TS1: { busy: false }, TS2: { busy: false } }, // BCL State
   emergencies:   {},   // radio_id → emergency data
   markers:       {},   // id → marker object (DB)
   addingMarker:  false,
@@ -156,6 +157,13 @@ function handleEvent(msg) {
 
     case "ptt_end":
       onPTTEnd(msg);
+      break;
+
+    case "channel_busy_update":
+      if (msg.channel_busy) {
+        STATE.channelBusy = msg.channel_busy;
+        updateChannelBusyUI();
+      }
       break;
 
     case "emergency":
@@ -371,6 +379,12 @@ function initFromState(msg) {
   // SNMP-Events
   STATE.snmpEvents = msg.snmp_events || [];
 
+  // Kanalbelegung (BCL)
+  if (msg.channel_busy) {
+    STATE.channelBusy = msg.channel_busy;
+    updateChannelBusyUI();
+  }
+
   // Alles rendern
   renderAll();
   initMap();
@@ -434,6 +448,16 @@ function onPTTStart(msg) {
   const rid = msg.radio_id;
   STATE.activePTTs[rid] = msg;
 
+  // Kanalbelegungs-Status (BCL) aktualisieren
+  if (msg.channel_busy) {
+    STATE.channelBusy = msg.channel_busy;
+  } else if (msg.slot) {
+    const s = msg.slot.toUpperCase();
+    if (!STATE.channelBusy) STATE.channelBusy = {};
+    STATE.channelBusy[s] = { busy: true, radio_id: rid, call_type: msg.call_type };
+  }
+  updateChannelBusyUI();
+
   // Sidebar-Unit aktualisieren
   const item = document.getElementById(`unit-item-${rid}`);
   if (item) {
@@ -471,6 +495,16 @@ function onPTTStart(msg) {
 function onPTTEnd(msg) {
   const rid = msg.radio_id;
   delete STATE.activePTTs[rid];
+
+  // Kanalbelegungs-Status (BCL) freigeben
+  if (msg.channel_busy) {
+    STATE.channelBusy = msg.channel_busy;
+  } else if (msg.slot) {
+    const s = msg.slot.toUpperCase();
+    if (!STATE.channelBusy) STATE.channelBusy = {};
+    STATE.channelBusy[s] = { busy: false, radio_id: null, call_type: null };
+  }
+  updateChannelBusyUI();
 
   // Sidebar zurücksetzen
   const item = document.getElementById(`unit-item-${rid}`);
@@ -3469,6 +3503,21 @@ function connectPttAudioWs() {
     console.log("[Web-PTT] Audio-WebSocket getrennt");
     setTimeout(connectPttAudioWs, 3000);
   };
+  pttAudioWs.onmessage = (e) => {
+    try {
+      if (typeof e.data === "string") {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "ptt_ack" && msg.action === "press" && !msg.success && msg.reason === "channel_busy") {
+          console.warn("[Web-PTT] Sendung vom Server abgelehnt:", msg.message);
+          playBusyBonkSound();
+          showToast("⚠️ Kanal belegt", msg.message || "Kanal ist belegt.", "warning", 3500);
+          if (isWebPttActive) stopWebPtt();
+        }
+      }
+    } catch (err) {
+      console.debug("[Web-PTT] WS Msg Error:", err);
+    }
+  };
   pttAudioWs.onerror = (e) => console.debug("[Web-PTT] WS Error:", e);
 }
 
@@ -3521,8 +3570,103 @@ function onPttCallTypeSelectChange() {
   }
 }
 
+function onPttSlotSelectChange() {
+  updateChannelBusyUI();
+}
+
+function updateChannelBusyUI() {
+  const slotSel = document.getElementById("ptt-slot-select");
+  const slot = (slotSel ? slotSel.value : "TS1").toUpperCase();
+  const badge = document.getElementById("ptt-channel-status-badge");
+  const btn = document.getElementById("btn-web-ptt");
+  const btnText = document.getElementById("ptt-btn-text");
+  const overrideCheckbox = document.getElementById("ptt-priority-override");
+  const isOverride = overrideCheckbox ? overrideCheckbox.checked : false;
+
+  const slotInfo = STATE.channelBusy?.[slot] || { busy: false };
+  const isBusy = Boolean(slotInfo.busy);
+
+  if (badge) {
+    if (isBusy) {
+      const alias = STATE.radios[slotInfo.radio_id]?.alias || (slotInfo.radio_id ? `ID ${slotInfo.radio_id}` : "Funkgerät");
+      badge.className = "ptt-channel-badge badge-busy";
+      badge.textContent = `⚠️ ${slot} BELEGT (${alias})`;
+      badge.title = `${slot} wird aktuell genutzt von ${alias}.`;
+    } else {
+      badge.className = "ptt-channel-badge badge-free";
+      badge.textContent = `● ${slot} FREI`;
+      badge.title = `Kanal ${slot} ist frei.`;
+    }
+  }
+
+  // Button nur aktualisieren, wenn PTT gerade NICHT aktiv sendet
+  if (!isWebPttActive && btn && btnText) {
+    if (isBusy && !isOverride) {
+      btn.classList.remove("btn-override");
+      btn.classList.add("btn-busy");
+      btnText.textContent = "⚠️ KANAL BELEGT";
+      btn.title = `${slot} ist belegt durch Funkgerät. Haken bei 'Vorrang' setzen zum Überstimmen.`;
+    } else if (isBusy && isOverride) {
+      btn.classList.remove("btn-busy");
+      btn.classList.add("btn-override");
+      btnText.textContent = "⚡ VORRANG-PTT";
+      btn.title = `Kanal ${slot} ist belegt – Tastendruck sendet Vorrang-Durchsage (Preemption)!`;
+    } else {
+      btn.classList.remove("btn-busy", "btn-override");
+      btnText.textContent = "PTT SPRECHEN";
+      btn.title = "Gedrückt halten zum Sprechen (oder Leertaste halten)";
+    }
+  }
+}
+
+function playBusyBonkSound() {
+  try {
+    const ctx = pttAudioContext || new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === "suspended") ctx.resume();
+
+    // Akustisches DMR-Besetzt-Signal (zwei abfallende tiefe Töne)
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(420, ctx.currentTime);
+    osc.frequency.setValueAtTime(310, ctx.currentTime + 0.08);
+
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.005, ctx.currentTime + 0.22);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.24);
+  } catch (e) {
+    console.debug("[Web-PTT] Bonk-Sound:", e);
+  }
+}
+
 async function startWebPtt() {
   if (isWebPttActive) return;
+
+  const slot = (document.getElementById("ptt-slot-select")?.value || "TS1").toUpperCase();
+  const callType = parseInt(document.getElementById("ptt-calltype-select")?.value) || 1;
+  const targetId = (callType === 2) 
+    ? 16777215 
+    : (parseInt(document.getElementById("ptt-target-tg")?.value) || 1);
+  const overrideCheckbox = document.getElementById("ptt-priority-override");
+  const isOverride = overrideCheckbox ? overrideCheckbox.checked : false;
+
+  // Busy Channel Lockout (BCL) Prüfung: Verhindert versehentliches Drüberfunken
+  const slotInfo = STATE.channelBusy?.[slot] || { busy: false };
+  if (slotInfo.busy && !isOverride && callType !== 2) {
+    const alias = STATE.radios[slotInfo.radio_id]?.alias || (slotInfo.radio_id ? `ID ${slotInfo.radio_id}` : "Funkgerät");
+    playBusyBonkSound();
+    showToast(
+      `⚠️ Kanal ${slot} belegt`,
+      `Gespräch durch ${alias} aktiv. Haken bei 'Vorrang' setzen, um Vorrang-Durchsage zu erzwingen.`,
+      "warning",
+      4000
+    );
+    return;
+  }
 
   try {
     const ok = await initPttAudio();
@@ -3539,52 +3683,67 @@ async function startWebPtt() {
     pttStartTimestamp = Date.now();
     playPttStartChirp();
 
-  const slot = document.getElementById("ptt-slot-select")?.value || "TS1";
-  const callType = parseInt(document.getElementById("ptt-calltype-select")?.value) || 1;
-  const targetId = (callType === 2) 
-    ? 16777215 
-    : (parseInt(document.getElementById("ptt-target-tg")?.value) || 1);
+    // UI sofort auf aktiv setzen
+    const btn = document.getElementById("btn-web-ptt");
+    const bar = document.getElementById("web-ptt-bar");
+    const btnText = document.getElementById("ptt-btn-text");
+    const timerEl = document.getElementById("ptt-tx-timer");
 
-  // UI sofort auf aktiv setzen
-  const btn = document.getElementById("btn-web-ptt");
-  const bar = document.getElementById("web-ptt-bar");
-  const btnText = document.getElementById("ptt-btn-text");
-  const timerEl = document.getElementById("ptt-tx-timer");
+    if (btn) {
+      btn.classList.remove("btn-busy", "btn-override");
+      btn.classList.add("active");
+    }
+    if (bar) bar.classList.add("tx-active");
+    if (btnText) {
+      if (callType === 2) {
+        btnText.textContent = "🚨 ALL-CALL...";
+      } else if (slotInfo.busy && isOverride) {
+        btnText.textContent = "⚡ VORRANG...";
+      } else {
+        btnText.textContent = "🔴 SENDET...";
+      }
+    }
+    if (timerEl) {
+      timerEl.classList.add("active");
+      timerEl.textContent = "00:00";
+    }
 
-  if (btn) btn.classList.add("active");
-  if (bar) bar.classList.add("tx-active");
-  if (btnText) btnText.textContent = (callType === 2) ? "🚨 ALL-CALL..." : "🔴 SENDET...";
-  if (timerEl) {
-    timerEl.classList.add("active");
-    timerEl.textContent = "00:00";
-  }
+    clearInterval(pttTimerInterval);
+    pttTimerInterval = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - pttStartTimestamp) / 1000);
+      const m = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
+      const s = String(elapsedSec % 60).padStart(2, "0");
+      if (timerEl) timerEl.textContent = `${m}:${s}`;
+    }, 500);
 
-  clearInterval(pttTimerInterval);
-  pttTimerInterval = setInterval(() => {
-    const elapsedSec = Math.floor((Date.now() - pttStartTimestamp) / 1000);
-    const m = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
-    const s = String(elapsedSec % 60).padStart(2, "0");
-    if (timerEl) timerEl.textContent = `${m}:${s}`;
-  }, 500);
+    // Befehl senden
+    const cmd = {
+      action: "ptt_press",
+      slot: slot,
+      target_id: targetId,
+      call_type: callType,
+      priority_override: isOverride,
+      sample_rate: pttAudioContext.sampleRate,
+    };
 
-  // Befehl senden
-  const cmd = {
-    action: "ptt_press",
-    slot: slot,
-    target_id: targetId,
-    call_type: callType,
-    sample_rate: pttAudioContext.sampleRate,
-  };
-
-  if (pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
-    pttAudioWs.send(JSON.stringify(cmd));
-  } else {
-    fetch("/api/tx/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cmd),
-    }).catch(e => console.error("TX Start API Fehler:", e));
-  }
+    if (pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
+      pttAudioWs.send(JSON.stringify(cmd));
+    } else {
+      fetch("/api/tx/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cmd),
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.success && res.reason === "channel_busy") {
+          playBusyBonkSound();
+          showToast("⚠️ Kanal belegt", res.message || "Kanal belegt.", "warning", 4000);
+          stopWebPtt();
+        }
+      })
+      .catch(e => console.error("TX Start API Fehler:", e));
+    }
 
     // Audio-Wiedergabe stoppen falls gerade aktiv
     const audio = document.getElementById("global-audio-element");
@@ -3593,6 +3752,7 @@ async function startWebPtt() {
     isWebPttActive = false;
     console.error("startWebPtt Fehler:", err);
     showToast("PTT Fehler", String(err?.message || err), "warning");
+    updateChannelBusyUI();
   }
 }
 
@@ -3622,6 +3782,9 @@ function stopWebPtt() {
   }
   // Redundante Absicherung per REST: Garantiert, dass der Repeater IMMER sofort abfällt
   fetch("/api/tx/stop", { method: "POST" }).catch(e => console.error("TX Stop API Fehler:", e));
+
+  // Button und Badge an aktuellen Kanalbelegungsstatus anpassen
+  updateChannelBusyUI();
 }
 
 function onTxStateChanged(msg) {
