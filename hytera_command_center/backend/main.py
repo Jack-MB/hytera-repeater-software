@@ -654,10 +654,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    hcc_port = int(os.environ.get("HCC_PORT", HTTP_PORT))
+    hcc_proto = os.environ.get("HCC_PROTOCOL", "https" if hcc_port == 8443 else "http")
     logger.info("=" * 45)
     logger.info("  Hytera Command Center - bereit")
-    logger.info(f"  Lokal: http://localhost:{HTTP_PORT}")
-    logger.info(f"  LAN:   http://{local_lan_ip}:{HTTP_PORT}")
+    logger.info(f"  Lokal: {hcc_proto}://localhost:{hcc_port}")
+    logger.info(f"  LAN:   {hcc_proto}://{local_lan_ip}:{hcc_port}")
     logger.info("=" * 45)
 
     yield

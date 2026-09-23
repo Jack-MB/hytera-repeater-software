@@ -122,6 +122,8 @@ def main():
     default_port = 8443 if use_ssl else 8000
     host = os.environ.get("HCC_HOST", "0.0.0.0")
     port = int(os.environ.get("HCC_PORT", default_port))
+    os.environ["HCC_PORT"] = str(port)
+    os.environ["HCC_PROTOCOL"] = protocol
 
     import socket
     local_ip = "127.0.0.1"
