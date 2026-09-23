@@ -1598,10 +1598,10 @@ async def websocket_tx_audio(ws: WebSocket):
                         in_sample_rate = int(cmd.get("sample_rate", 48000))
                         if _tx_sender:
                             success = await _tx_sender.start_tx(slot=slot, target_id=target_id, call_type=call_type)
-                            client_in_tx = success
+                            client_in_tx = True
                             await ws.send_json({"type": "ptt_ack", "action": "press", "success": success})
                     elif action == "ptt_release":
-                        if _tx_sender and client_in_tx:
+                        if _tx_sender:
                             await _tx_sender.stop_tx()
                             client_in_tx = False
                             await ws.send_json({"type": "ptt_ack", "action": "release", "success": True})
@@ -1610,14 +1610,14 @@ async def websocket_tx_audio(ws: WebSocket):
                 except Exception as exc:
                     logger.debug(f"Web-PTT JSON Fehler: {exc}")
             elif "bytes" in msg and msg["bytes"]:
-                if _tx_sender and client_in_tx:
+                if _tx_sender and _tx_sender.is_transmitting:
                     _tx_sender.feed_pcm16_audio(msg["bytes"], in_sample_rate=in_sample_rate)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         logger.debug(f"Web-PTT WebSocket Fehler: {exc}")
     finally:
-        if client_in_tx and _tx_sender:
+        if _tx_sender and client_in_tx and _tx_sender.is_transmitting:
             await _tx_sender.stop_tx()
 
 

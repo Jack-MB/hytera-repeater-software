@@ -79,3 +79,10 @@ temp_usb.txt
 temp_*.txt
 *.tmp
 *.log
+
+# SSL Certificates (Auto-generated locally)
+ssl/
+**/ssl/
+*.crt
+*.key
+

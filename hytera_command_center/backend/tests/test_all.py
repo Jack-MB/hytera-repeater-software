@@ -1533,6 +1533,32 @@ class TestHyteraTxSender:
                 assert ack2["action"] == "release"
                 assert ack2["success"] is True
 
+    def test_websocket_tx_release_fallback_when_started_via_rest(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        with TestClient(app) as client:
+            # 1. Start ueber REST (z. B. wenn WS waehrend Klick noch verbindet)
+            res = client.post("/api/tx/start", json={"slot": "TS1", "target_id": 1, "call_type": 1})
+            assert res.status_code == 200
+            assert res.json()["success"] is True
+
+            # 2. Verbindung ueber WebSocket herstellen und Audio senden
+            with client.websocket_connect("/ws/tx_audio") as ws:
+                pcm_data = struct.pack('<480h', *([200] * 480))
+                ws.send_bytes(pcm_data)
+
+                # 3. Release ueber WebSocket muss TX zuverlaessig beenden
+                ws.send_json({"action": "ptt_release"})
+                ack = ws.receive_json()
+                assert ack["type"] == "ptt_ack"
+                assert ack["action"] == "release"
+                assert ack["success"] is True
+
+            # 4. Status pruefen: Senden muss aus sein
+            res_stat = client.get("/api/tx/status")
+            assert res_stat.json()["is_transmitting"] is False
+
     @pytest.mark.asyncio
     async def test_tot_watchdog_auto_cutoff(self):
         from backend.protocol.tx_sender import HyteraTxSender

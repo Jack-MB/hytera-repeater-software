@@ -3619,9 +3619,9 @@ function stopWebPtt() {
   const cmd = { action: "ptt_release" };
   if (pttAudioWs && pttAudioWs.readyState === WebSocket.OPEN) {
     pttAudioWs.send(JSON.stringify(cmd));
-  } else {
-    fetch("/api/tx/stop", { method: "POST" }).catch(e => console.error("TX Stop API Fehler:", e));
   }
+  // Redundante Absicherung per REST: Garantiert, dass der Repeater IMMER sofort abfällt
+  fetch("/api/tx/stop", { method: "POST" }).catch(e => console.error("TX Stop API Fehler:", e));
 }
 
 function onTxStateChanged(msg) {
@@ -3667,6 +3667,9 @@ function setupWebPttListeners() {
   const btn = document.getElementById("btn-web-ptt");
   const micBtn = document.getElementById("btn-ptt-mic-perm");
 
+  // Audio-WebSocket im Hintergrund vorbereitend verbinden
+  connectPttAudioWs();
+
   if (micBtn) {
     micBtn.addEventListener("click", () => initPttAudio());
   }
@@ -3699,6 +3702,21 @@ function setupWebPttListeners() {
     }, { passive: false });
   }
 
+  // Globaler Not-Stopp bei Maus-Release irgendwo auf dem Bildschirm
+  window.addEventListener("mouseup", () => {
+    if (isWebPttActive) {
+      stopWebPtt();
+    }
+  });
+
+  // Globaler Not-Stopp bei Fensterwechsel / Tab-Verlassen
+  window.addEventListener("blur", () => {
+    if (isWebPttActive) {
+      console.log("[Web-PTT] Fenster hat Fokus verloren -> Not-Stopp");
+      stopWebPtt();
+    }
+  });
+
   // Tastatur Hotkey: Leertaste halten
   window.addEventListener("keydown", (e) => {
     if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.repeat) {
@@ -3712,8 +3730,7 @@ function setupWebPttListeners() {
 
   window.addEventListener("keyup", (e) => {
     if (e.code === "Space" || e.key === " " || e.key === "Spacebar") {
-      const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
-      if (tag !== "input" && tag !== "textarea" && tag !== "select" && !document.activeElement?.isContentEditable) {
+      if (isWebPttActive) {
         e.preventDefault();
         stopWebPtt();
       }

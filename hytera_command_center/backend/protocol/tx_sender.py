@@ -297,8 +297,8 @@ class HyteraTxSender:
         4. Startet Pacer- und TOT-Watchdog-Tasks
         """
         if self.is_transmitting:
-            logger.warning("start_tx aufgerufen, aber TX ist bereits aktiv!")
-            return False
+            logger.info("start_tx aufgerufen, aber TX ist bereits aktiv (Re-Keying oder aktiver Stream).")
+            return True
 
         self.is_transmitting = True
         self.active_slot = slot.upper()
